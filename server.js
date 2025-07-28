@@ -1,15 +1,12 @@
-const express = require('express');
-const app = express();
+const http = require('http');
 
-// Railway requiere HOST y PORT específicos
 const PORT = process.env.PORT || 3000;
-const HOST = '0.0.0.0';
 
-app.get('/', (req, res) => {
-  res.send('✅ Tu servidor Railway está funcionando 🎉');
+const server = http.createServer((req, res) => {
+  res.writeHead(200, { 'Content-Type': 'text/html' });
+  res.end('🎉 Servidor funcionando en Railway!');
 });
 
-// IMPORTANTE: Escuchar en 0.0.0.0, no localhost
-app.listen(PORT, HOST, () => {
-  console.log(`🚀 Servidor escuchando en ${HOST}:${PORT}`);
+server.listen(PORT, '0.0.0.0', () => {
+  console.log(`🚀 Servidor HTTP en puerto ${PORT}`);
 });
