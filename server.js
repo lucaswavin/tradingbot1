@@ -3,7 +3,7 @@ const url = require('url');
 const fs = require('fs'); // Opcional para persistencia
 
 const PORT = process.env.PORT || 3000;
-const SECRET = process.env.WEBHOOK_SECRET || 'mi_clave_secreta';
+const SECRET = process.env.WEBHOOK_SECRET || 'Lucas?1234';
 
 let botState = {
   isActive: true,
@@ -59,22 +59,55 @@ const server = http.createServer((req, res) => {
     res.writeHead(200);
     res.end(`
       <!DOCTYPE html>
-      <html><head><title>Bot Activo</title><meta charset="UTF-8"></head>
-      <body style="font-family: sans-serif; max-width: 800px; margin: auto;">
-        <h1>🤖 Trading Bot Activo</h1>
-        <p>Estado: ${botState.isActive ? '🟢 Activo' : '🔴 Pausado'}</p>
-        <p>Total señales: ${botState.totalSignals}</p>
-        <p>Webhook: <code>https://${req.headers.host}/webhook</code></p>
-        <h2>Últimas señales:</h2>
-        <ul>
-          ${lastSignals.map(s => `<li>[${s.action}] ${s.symbol} @ ${s.timestamp}</li>`).join('')}
-        </ul>
-        <form method="POST" action="/api/toggle">
-          <button type="submit">${botState.isActive ? '⏸️ Pausar' : '▶️ Activar'} Bot</button>
-        </form>
-        <form method="POST" action="/api/clear">
-          <button type="submit">🗑️ Limpiar historial</button>
-        </form>
+      <html><head><title>🤖 Trading Bot Activo</title><meta charset="UTF-8">
+      <style>
+        body { font-family: Arial, sans-serif; max-width: 800px; margin: auto; padding: 20px; background: #f5f5f5; }
+        .container { background: white; padding: 20px; border-radius: 8px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); margin: 20px 0; }
+        .status { padding: 15px; border-radius: 6px; margin: 10px 0; }
+        .active { background: #d4edda; color: #155724; }
+        .inactive { background: #f8d7da; color: #721c24; }
+        .signal { background: #e3f2fd; padding: 10px; margin: 5px 0; border-radius: 4px; border-left: 4px solid #2196f3; }
+        button { background: #007bff; color: white; border: none; padding: 10px 20px; border-radius: 4px; cursor: pointer; margin: 5px; }
+        .webhook-url { background: #e8f4f8; padding: 10px; border-radius: 4px; font-family: monospace; word-break: break-all; }
+      </style>
+      </head>
+      <body>
+        <div class="container">
+          <h1>🤖 Trading Bot Activo</h1>
+          <div class="status ${botState.isActive ? 'active' : 'inactive'}">
+            <p><strong>Estado:</strong> ${botState.isActive ? '🟢 Activo' : '🔴 Pausado'}</p>
+            <p><strong>Total señales:</strong> ${botState.totalSignals}</p>
+          </div>
+          
+          <div>
+            <h3>📡 Webhook URL:</h3>
+            <div class="webhook-url">https://${req.headers.host}/webhook</div>
+          </div>
+
+          <div>
+            <h3>🎛️ Controles:</h3>
+            <form method="POST" action="/api/toggle" style="display: inline;">
+              <button type="submit">${botState.isActive ? '⏸️ Pausar' : '▶️ Activar'} Bot</button>
+            </form>
+            <form method="POST" action="/api/clear" style="display: inline;">
+              <button type="submit">🗑️ Limpiar historial</button>
+            </form>
+            <button onclick="location.reload()">🔄 Actualizar</button>
+          </div>
+
+          <div>
+            <h3>📊 Últimas señales (${lastSignals.length}):</h3>
+            ${lastSignals.length === 0 ? 
+              '<p>No hay señales aún. Configura TradingView para empezar.</p>' :
+              lastSignals.map(s => `
+                <div class="signal">
+                  <strong>[${s.action}]</strong> ${s.symbol} @ ${s.timestamp}
+                  <br><small>Datos: ${JSON.stringify(s.data, null, 2)}</small>
+                </div>
+              `).join('')
+            }
+          </div>
+        </div>
       </body></html>
     `);
 
@@ -87,9 +120,11 @@ const server = http.createServer((req, res) => {
         return;
       }
 
+      console.log('📡 Petición recibida:', data);
+
       // Validación de seguridad
       if (!data.secret || data.secret !== SECRET) {
-        console.warn('⚠️ Clave secreta inválida o ausente');
+        console.warn('⚠️ Clave secreta inválida. Recibida:', data.secret, 'Esperada:', SECRET);
         res.writeHead(401);
         res.end(JSON.stringify({ success: false, error: 'Unauthorized' }));
         return;
@@ -132,6 +167,20 @@ const server = http.createServer((req, res) => {
       res.end(JSON.stringify({ success: true, message: 'Señal procesada', id: signal.id }));
     });
 
+  } else if (path === '/webhook' && req.method === 'GET') {
+    // Info del webhook
+    res.writeHead(200);
+    res.end(`
+      <div style="font-family: Arial; max-width: 600px; margin: 50px auto; padding: 20px;">
+        <h2>📡 Webhook Endpoint Activo</h2>
+        <p>✅ Este endpoint está listo para recibir señales POST de TradingView</p>
+        <p><strong>Estado:</strong> ${botState.isActive ? '🟢 Activo' : '🔴 Pausado'}</p>
+        <p><strong>Total señales:</strong> ${botState.totalSignals}</p>
+        <p><strong>Secret esperado:</strong> ${SECRET}</p>
+        <p><a href="/">← Volver al Panel</a></p>
+      </div>
+    `);
+
   } else if (path === '/api/toggle' && req.method === 'POST') {
     botState.isActive = !botState.isActive;
     console.log(`🎛️ Bot ${botState.isActive ? 'activado' : 'pausado'}`);
@@ -161,4 +210,5 @@ const server = http.createServer((req, res) => {
 server.listen(PORT, '0.0.0.0', () => {
   console.log(`🚀 Bot listo en puerto ${PORT}`);
   console.log(`📡 Webhook activo en /webhook`);
+  console.log(`🔑 Secret configurado: ${SECRET}`);
 });
