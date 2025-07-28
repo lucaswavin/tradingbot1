@@ -103,6 +103,7 @@ async function getBalance() {
     const response = await bingXRequest('/openApi/swap/v2/user/balance');
     console.log('✅ Balance obtenido:', response);
     botState.bingxConnected = true;
+    botState.balance = response?.data?.balance || 0;
     return response;
   } catch (error) {
     console.error('❌ Error obteniendo balance:', error.message);
@@ -333,16 +334,15 @@ const server = http.createServer((req, res) => {
     });
 
   } else if (path === '/api/test-bingx' && req.method === 'POST') {
-    try {
-      const balance = await getBalance();
+    getBalance().then(() => {
       console.log('🧪 Test BingX exitoso');
       res.writeHead(302, { Location: '/' });
       res.end();
-    } catch (error) {
+    }).catch(error => {
       console.error('🧪 Test BingX fallido:', error);
       res.writeHead(302, { Location: '/' });
       res.end();
-    }
+    });
 
   } else if (path === '/api/toggle' && req.method === 'POST') {
     botState.isActive = !botState.isActive;
@@ -376,16 +376,18 @@ const server = http.createServer((req, res) => {
   }
 });
 
-// === INICIALIZAR ===
-server.listen(PORT, '0.0.0.0', async () => {
+// === INICIALIZAR (corregido) ===
+server.listen(PORT, '0.0.0.0', () => {
   console.log(`🚀 Trading Bot iniciado en puerto ${PORT}`);
   console.log(`📡 Webhook activo en /webhook`);
-  
-  // Test inicial de BingX
+  inicializarBot();
+});
+
+async function inicializarBot() {
   try {
     await getBalance();
     console.log('✅ BingX conectado correctamente');
   } catch (error) {
     console.log('⚠️ BingX no conectado:', error.message);
   }
-});
+}
