@@ -4,9 +4,6 @@ const dashboardController = require('../controllers/dashboardController');
 
 router.get('/', dashboardController.dashboard);
 
-router.post('/api/refresh-balance', async (req, res) => {
-  // Solo para refrescar balance y recargar dashboard
-  res.redirect('/');
-});
+router.post('/api/refresh-balance', dashboardController.refreshBalance);
 
 module.exports = router;
