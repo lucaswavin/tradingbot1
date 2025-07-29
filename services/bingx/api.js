@@ -58,19 +58,18 @@ async function bingXRequest(endpoint, params = {}, method = 'GET') {
 
 async function getBalance() {
   try {
-    return await bingXRequest('/openApi/swap/v2/user/balance');
+    const res = await bingXRequest('/openApi/swap/v2/user/balance');
+    // Puedes guardar el balance global si quieres (opcional)
+    if (!global.botState) global.botState = {};
+    global.botState.balance = res?.data?.balance || 0;
+    return res;
   } catch (error) {
     throw error;
   }
 }
 
-async function executeOrder(signal) {
-  // Ejemplo básico
-  return { success: true, message: 'Simulación de orden', signal };
-}
-
 module.exports = {
   bingXRequest,
-  getBalance,
-  executeOrder
+  getBalance
 };
+
