@@ -1,25 +1,14 @@
 {
-  "name": "tradingbot-basico",
+  "name": "tradingbot-profesional",
   "version": "1.0.0",
-  "description": "Bot de trading básico con BingX y TradingView",
   "main": "src/server.js",
   "scripts": {
     "start": "node src/server.js"
   },
-  "engines": {
-    "node": ">=18.0.0"
-  },
   "dependencies": {
+    "axios": "^1.7.2",
     "dotenv": "^16.4.5",
     "express": "^4.19.2"
-  },
-  "keywords": [
-    "trading",
-    "bot",
-    "bingx",
-    "tradingview",
-    "nodejs"
-  ],
-  "author": "Lucas",
-  "license": "MIT"
+  }
 }
+
