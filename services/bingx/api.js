@@ -41,10 +41,14 @@ async function bingXRequest(endpoint, params = {}, method = 'GET') {
     return response.data;
   } catch (error) {
     if (error.response) {
-      // Muestra el error de la API
-      console.error('BingX API Error:', JSON.stringify(error.response.data));
-      return error.response.data; // <-- Devolvemos el error real para debug
+      console.error('--- BingX API ERROR EN bingXRequest ---');
+      console.error(JSON.stringify(error.response.data));
+      console.error('--- FIN ERROR ---');
+      return error.response.data; // para debug
     } else {
+      console.error('--- BingX API ERROR: NO RESPONSE ---');
+      console.error(error);
+      console.error('--- FIN ERROR ---');
       throw error;
     }
   }
@@ -52,18 +56,25 @@ async function bingXRequest(endpoint, params = {}, method = 'GET') {
 
 async function getUSDTBalance() {
   const res = await bingXRequest('/openApi/swap/v2/user/balance');
-  // --- DEBUG LOG PARA VER LA RESPUESTA DE BINGX ---
   console.log('===== RESPUESTA REAL BINGX BALANCE =====');
   console.log(JSON.stringify(res));
   console.log('========================================');
-  // ------------------------------------------------
-  if (res && Array.isArray(res.data)) {
-    const usdt = res.data.find(item => item.asset === 'USDT');
-    if (usdt) return Number(usdt.balance);
-    else return 0;
-  } else {
-    throw new Error('No se pudo obtener el balance.');
+
+  if (res && res.code === 0 && res.data) {
+    // Caso 1: formato objeto
+    if (res.data.balance && typeof res.data.balance === 'object') {
+      // El balance USDT está aquí
+      return Number(res.data.balance.balance);
+    }
+    // Caso 2: formato array
+    if (Array.isArray(res.data)) {
+      const usdt = res.data.find(item => item.asset === 'USDT');
+      if (usdt) return Number(usdt.balance);
+      else return 0;
+    }
   }
+  // Si llega aquí, el formato no es soportado o es error
+  throw new Error('No se pudo obtener el balance.');
 }
 
 module.exports = {
