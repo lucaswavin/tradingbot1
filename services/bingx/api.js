@@ -5,7 +5,7 @@ const API_KEY = process.env.BINGX_API_KEY;
 const API_SECRET = process.env.BINGX_API_SECRET;
 const HOST = "open-api.bingx.com";
 
-// Convierte "TROLLSOLUSDT.P" -> "TROLLSOL-USDT"
+// Normaliza el symbol de TradingView a BingX
 function normalizeSymbol(symbol) {
   if (!symbol) return symbol;
   let base = symbol.replace('.P', '');
@@ -30,8 +30,27 @@ function getParameters(payload, timestamp, urlEncode = false) {
   return parameters;
 }
 
-async function placeOrder({ symbol, side, quantity, leverage = 5, positionMode = 'ISOLATED' }) {
+// Calcula el tamaño de contrato para mover 1 USDT en el par
+async function calcularEntrustVolume1USDT(symbol) {
+  // 1. Obtiene el precio actual usando la API de BingX
+  const priceData = await axios.get(`https://${HOST}/openApi/swap/v2/quote/price?symbol=${symbol}`);
+  const price = parseFloat(priceData.data.data.price);
+
+  // 2. Calcula el tamaño de contrato equivalente a 1 USDT
+  let volume = 1 / price;
+
+  // 3. Redondea al tickSize mínimo (0.01 suele ser el mínimo, pero puedes consultar la API de contratos)
+  const tickSize = 0.01;
+  volume = Math.max(tickSize, Math.floor(volume / tickSize) * tickSize);
+
+  return volume.toFixed(2); // Ajusta los decimales según el par
+}
+
+async function placeOrder({ symbol, side, leverage = 5, positionMode = 'ISOLATED' }) {
   symbol = normalizeSymbol(symbol);
+
+  // Calcula el tamaño de contrato para 1 USDT
+  const entrustVolume = await calcularEntrustVolume1USDT(symbol);
 
   const payload = {
     symbol,
@@ -39,8 +58,8 @@ async function placeOrder({ symbol, side, quantity, leverage = 5, positionMode =
     positionSide: side.toUpperCase() === 'BUY' ? 'LONG' : 'SHORT',
     marginMode: positionMode.toUpperCase(),
     leverage: leverage.toString(),
-    entrustType: 1,
-    entrustVolume: quantity.toString()
+    entrustType: 1, // market
+    entrustVolume
   };
 
   const timestamp = Date.now();
@@ -83,6 +102,7 @@ async function placeOrder({ symbol, side, quantity, leverage = 5, positionMode =
   }
 }
 
+// BALANCE igual que antes
 async function getUSDTBalance() {
   const timestamp = Date.now();
   const paramStr = `timestamp=${timestamp}`;
