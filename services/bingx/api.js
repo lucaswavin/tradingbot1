@@ -1,4 +1,3 @@
-// services/bingx/api.js
 const axios = require('axios');
 const crypto = require('crypto');
 
@@ -11,6 +10,7 @@ function createBingXSignature(params) {
     .sort()
     .map(key => `${key}=${params[key]}`)
     .join('&');
+  console.log('🔐 Query a firmar:', query); // LOG de la firma
   return crypto
     .createHmac('sha256', BINGX_API_SECRET)
     .update(query)
@@ -29,6 +29,8 @@ async function bingXRequest(endpoint, params = {}, method = 'GET') {
     .map(key => `${key}=${requestParams[key]}`)
     .join('&');
   const fullUrl = `${BINGX_BASE_URL}${endpoint}?${queryString}`;
+  console.log('🌐 FULL URL:', fullUrl); // LOG de la URL final
+
   try {
     const response = await axios({
       url: fullUrl,
@@ -54,18 +56,30 @@ async function bingXRequest(endpoint, params = {}, method = 'GET') {
   }
 }
 
+async function placeOrder({ symbol, side, quantity, leverage = 5, positionMode = 'ISOLATED' }) {
+  const params = {
+    symbol,
+    side: side.toUpperCase(),
+    positionSide: side.toUpperCase() === 'BUY' ? 'LONG' : 'SHORT',
+    marginMode: positionMode.toUpperCase(),
+    leverage: leverage.toString(),
+    entrustType: 1, // Market
+    entrustVolume: quantity.toString(),
+    source: "API"
+  };
+  console.log('📦 Params de placeOrder:', params); // LOG de los parámetros enviados
+  return await bingXRequest('/openApi/swap/v2/trade/order', params, 'POST');
+}
+
 async function getUSDTBalance() {
   const res = await bingXRequest('/openApi/swap/v2/user/balance');
   console.log('===== RESPUESTA REAL BINGX BALANCE =====');
   console.log(JSON.stringify(res));
   console.log('========================================');
-
   if (res && res.code === 0 && res.data) {
-    // Caso 1: formato objeto
     if (res.data.balance && typeof res.data.balance === 'object') {
       return Number(res.data.balance.balance);
     }
-    // Caso 2: formato array
     if (Array.isArray(res.data)) {
       const usdt = res.data.find(item => item.asset === 'USDT');
       if (usdt) return Number(usdt.balance);
@@ -74,24 +88,6 @@ async function getUSDTBalance() {
   }
   throw new Error('No se pudo obtener el balance.');
 }
-
-// ---- AÑADE AQUÍ LA FUNCIÓN placeOrder ----
-async function placeOrder({ symbol, side, quantity, leverage = 5, positionMode = 'isolated' }) {
-  const params = {
-    symbol,
-    side: side.toUpperCase(),         
-    positionSide: side === 'buy' ? 'LONG' : 'SHORT', 
-    marginMode: positionMode,         
-    leverage: leverage.toString(),    
-    entrustType: 1,                   // 1 = market order
-    entrustPrice: '',                 
-    entrustVolume: quantity.toString(),
-    source: "API"
-  };
-  // endpoint POST para crear orden
-  return await bingXRequest('/openApi/swap/v2/trade/order', params, 'POST');
-}
-// ---- FIN FUNCIÓN placeOrder ----
 
 module.exports = {
   bingXRequest,
