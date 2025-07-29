@@ -10,7 +10,7 @@ function createBingXSignature(params) {
     .sort()
     .map(key => `${key}=${params[key]}`)
     .join('&');
-  console.log('🔐 Query a firmar:', query); // LOG de la firma
+  console.log('🔐 Query a firmar:', query);
   return crypto
     .createHmac('sha256', BINGX_API_SECRET)
     .update(query)
@@ -21,6 +21,9 @@ async function bingXRequest(endpoint, params = {}, method = 'GET') {
   if (!BINGX_API_KEY || !BINGX_API_SECRET) {
     throw new Error('BingX API keys no configuradas');
   }
+  // Debug: Valor real de la API KEY
+  console.log('🟢 API KEY:', BINGX_API_KEY.length > 0 ? '[OK]' : '[VACÍA]');
+
   const timestamp = Date.now();
   const requestParams = { ...params, timestamp };
   const signature = createBingXSignature(requestParams);
@@ -29,17 +32,23 @@ async function bingXRequest(endpoint, params = {}, method = 'GET') {
     .map(key => `${key}=${requestParams[key]}`)
     .join('&');
   const fullUrl = `${BINGX_BASE_URL}${endpoint}?${queryString}`;
-  console.log('🌐 FULL URL:', fullUrl); // LOG de la URL final
+
+  // Debug: Headers enviados
+  const headers = {
+    'X-BX-APIKEY': BINGX_API_KEY,
+    'Content-Type': 'application/json'
+  };
+  console.log('🟡 Headers:', headers);
+  console.log('🌐 FULL URL:', fullUrl);
 
   try {
     const response = await axios({
       url: fullUrl,
       method,
-      headers: {
-        'X-BX-APIKEY': BINGX_API_KEY,
-        'Content-Type': 'application/json'
-      }
+      headers: headers
     });
+    // Debug: Headers de respuesta de BingX
+    console.log('🔴 Response Headers:', response.headers);
     return response.data;
   } catch (error) {
     if (error.response) {
@@ -57,17 +66,20 @@ async function bingXRequest(endpoint, params = {}, method = 'GET') {
 }
 
 async function placeOrder({ symbol, side, quantity, leverage = 5, positionMode = 'ISOLATED' }) {
+  // Intenta probar con y sin .P en el symbol, según docs de BingX
+  if (symbol.endsWith('.P')) symbol = symbol.replace('.P', '');
+
   const params = {
     symbol,
     side: side.toUpperCase(),
     positionSide: side.toUpperCase() === 'BUY' ? 'LONG' : 'SHORT',
     marginMode: positionMode.toUpperCase(),
     leverage: leverage.toString(),
-    entrustType: 1, // Market
-    entrustVolume: quantity.toString(),
-    source: "API"
+    entrustType: 1,
+    entrustVolume: quantity.toString()
+    // source: "API" // Quita este campo si sigue fallando
   };
-  console.log('📦 Params de placeOrder:', params); // LOG de los parámetros enviados
+  console.log('📦 Params de placeOrder:', params);
   return await bingXRequest('/openApi/swap/v2/trade/order', params, 'POST');
 }
 
