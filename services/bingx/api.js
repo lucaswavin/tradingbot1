@@ -1,3 +1,4 @@
+// services/bingx/api.js
 const crypto = require('crypto');
 const https = require('https');
 
@@ -56,20 +57,19 @@ async function bingXRequest(endpoint, params = {}, method = 'GET') {
   return await makeHttpRequest(fullUrl, options);
 }
 
-async function getBalance() {
-  try {
-    const res = await bingXRequest('/openApi/swap/v2/user/balance');
-    // Puedes guardar el balance global si quieres (opcional)
-    if (!global.botState) global.botState = {};
-    global.botState.balance = res?.data?.balance || 0;
-    return res;
-  } catch (error) {
-    throw error;
+// FUNCIÓN PRINCIPAL PARA OBTENER EL BALANCE DE USDT
+async function getUSDTBalance() {
+  const res = await bingXRequest('/openApi/swap/v2/user/balance');
+  if (res && Array.isArray(res.data)) {
+    const usdt = res.data.find(item => item.asset === 'USDT');
+    if (usdt) return Number(usdt.balance);
+    else return 0;
+  } else {
+    throw new Error('No se pudo obtener el balance.');
   }
 }
 
 module.exports = {
-  bingXRequest,
-  getBalance
+  getUSDTBalance
 };
 
