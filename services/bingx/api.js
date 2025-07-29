@@ -1,61 +1,79 @@
 const axios = require('axios');
 const crypto = require('crypto');
 
-const BINGX_API_KEY = process.env.BINGX_API_KEY;
-const BINGX_API_SECRET = process.env.BINGX_API_SECRET;
-const BINGX_BASE_URL = 'https://open-api.bingx.com';
+const API_KEY = process.env.BINGX_API_KEY;
+const API_SECRET = process.env.BINGX_API_SECRET;
+const HOST = "open-api.bingx.com";
 
-function createBingXSignature(params) {
-  const query = Object.keys(params)
-    .sort()
-    .map(key => `${key}=${params[key]}`)
-    .join('&');
-  console.log('🔐 Query a firmar:', query);
-  return crypto
-    .createHmac('sha256', BINGX_API_SECRET)
-    .update(query)
-    .digest('hex');
+// Convierte "TROLLSOLUSDT.P" -> "TROLLSOL-USDT"
+function normalizeSymbol(symbol) {
+  if (!symbol) return symbol;
+  let base = symbol.replace('.P', '');
+  if (base.endsWith('USDT')) {
+    base = base.replace(/USDT$/, '-USDT');
+  }
+  return base;
 }
 
-async function bingXRequest(endpoint, params = {}, method = 'GET') {
-  if (!BINGX_API_KEY || !BINGX_API_SECRET) {
-    throw new Error('BingX API keys no configuradas');
+// Construye los parámetros para la firma y la url
+function getParameters(payload, timestamp, urlEncode = false) {
+  let parameters = "";
+  const keys = Object.keys(payload).filter(k => payload[k] !== undefined && payload[k] !== '');
+  for (const key of keys) {
+    if (urlEncode) {
+      parameters += key + "=" + encodeURIComponent(payload[key]) + "&";
+    } else {
+      parameters += key + "=" + payload[key] + "&";
+    }
   }
-  // Debug: Valor real de la API KEY
-  console.log('🟢 API KEY:', BINGX_API_KEY.length > 0 ? '[OK]' : '[VACÍA]');
+  parameters += "timestamp=" + timestamp;
+  return parameters;
+}
+
+async function placeOrder({ symbol, side, quantity, leverage = 5, positionMode = 'ISOLATED' }) {
+  symbol = normalizeSymbol(symbol);
+
+  const payload = {
+    symbol,
+    side: side.toUpperCase(),
+    positionSide: side.toUpperCase() === 'BUY' ? 'LONG' : 'SHORT',
+    marginMode: positionMode.toUpperCase(),
+    leverage: leverage.toString(),
+    entrustType: 1,
+    entrustVolume: quantity.toString()
+  };
 
   const timestamp = Date.now();
-  const requestParams = { ...params, timestamp };
-  const signature = createBingXSignature(requestParams);
-  requestParams.signature = signature;
-  const queryString = Object.keys(requestParams)
-    .map(key => `${key}=${requestParams[key]}`)
-    .join('&');
-  const fullUrl = `${BINGX_BASE_URL}${endpoint}?${queryString}`;
+  const paramStr = getParameters(payload, timestamp, false); // para la firma
+  const signature = crypto.createHmac('sha256', API_SECRET).update(paramStr).digest('hex');
+  const paramStrUrl = getParameters(payload, timestamp, true); // para la url
+  const url = `https://${HOST}/openApi/swap/v2/trade/order?${paramStrUrl}&signature=${signature}`;
 
-  // Debug: Headers enviados
-  const headers = {
-    'X-BX-APIKEY': BINGX_API_KEY,
-    'Content-Type': 'application/json'
+  const config = {
+    method: 'POST',
+    url: url,
+    headers: {
+      'X-BX-APIKEY': API_KEY,
+      'Content-Type': 'application/json'
+    }
   };
-  console.log('🟡 Headers:', headers);
-  console.log('🌐 FULL URL:', fullUrl);
+
+  // Logs para debug
+  console.log("🌐 FULL URL:", url);
+  console.log("🔐 Query a firmar:", paramStr);
+  console.log("🟡 Headers:", config.headers);
 
   try {
-    const response = await axios({
-      url: fullUrl,
-      method,
-      headers: headers
-    });
-    // Debug: Headers de respuesta de BingX
-    console.log('🔴 Response Headers:', response.headers);
-    return response.data;
+    const resp = await axios(config);
+    console.log(resp.status);
+    console.log(resp.data);
+    return resp.data;
   } catch (error) {
     if (error.response) {
-      console.error('--- BingX API ERROR EN bingXRequest ---');
+      console.error('--- BingX API ERROR EN placeOrder ---');
       console.error(JSON.stringify(error.response.data));
       console.error('--- FIN ERROR ---');
-      return error.response.data; // para debug
+      return error.response.data;
     } else {
       console.error('--- BingX API ERROR: NO RESPONSE ---');
       console.error(error);
@@ -65,45 +83,53 @@ async function bingXRequest(endpoint, params = {}, method = 'GET') {
   }
 }
 
-async function placeOrder({ symbol, side, quantity, leverage = 5, positionMode = 'ISOLATED' }) {
-  // Intenta probar con y sin .P en el symbol, según docs de BingX
-  if (symbol.endsWith('.P')) symbol = symbol.replace('.P', '');
-
-  const params = {
-    symbol,
-    side: side.toUpperCase(),
-    positionSide: side.toUpperCase() === 'BUY' ? 'LONG' : 'SHORT',
-    marginMode: positionMode.toUpperCase(),
-    leverage: leverage.toString(),
-    entrustType: 1,
-    entrustVolume: quantity.toString()
-    // source: "API" // Quita este campo si sigue fallando
-  };
-  console.log('📦 Params de placeOrder:', params);
-  return await bingXRequest('/openApi/swap/v2/trade/order', params, 'POST');
-}
-
 async function getUSDTBalance() {
-  const res = await bingXRequest('/openApi/swap/v2/user/balance');
-  console.log('===== RESPUESTA REAL BINGX BALANCE =====');
-  console.log(JSON.stringify(res));
-  console.log('========================================');
-  if (res && res.code === 0 && res.data) {
-    if (res.data.balance && typeof res.data.balance === 'object') {
-      return Number(res.data.balance.balance);
+  const timestamp = Date.now();
+  const paramStr = `timestamp=${timestamp}`;
+  const signature = crypto.createHmac('sha256', API_SECRET).update(paramStr).digest('hex');
+  const url = `https://${HOST}/openApi/swap/v2/user/balance?timestamp=${timestamp}&signature=${signature}`;
+
+  const config = {
+    method: 'GET',
+    url: url,
+    headers: {
+      'X-BX-APIKEY': API_KEY,
+      'Content-Type': 'application/json'
     }
-    if (Array.isArray(res.data)) {
-      const usdt = res.data.find(item => item.asset === 'USDT');
-      if (usdt) return Number(usdt.balance);
-      else return 0;
+  };
+
+  try {
+    const resp = await axios(config);
+    console.log('===== RESPUESTA REAL BINGX BALANCE =====');
+    console.log(JSON.stringify(resp.data));
+    console.log('========================================');
+    if (resp.data && resp.data.code === 0 && resp.data.data) {
+      if (resp.data.data.balance && typeof resp.data.data.balance === 'object') {
+        return Number(resp.data.data.balance.balance);
+      }
+      if (Array.isArray(resp.data.data)) {
+        const usdt = resp.data.data.find(item => item.asset === 'USDT');
+        if (usdt) return Number(usdt.balance);
+        else return 0;
+      }
     }
+    throw new Error('No se pudo obtener el balance.');
+  } catch (error) {
+    console.error('--- BingX API ERROR EN getUSDTBalance ---');
+    if (error.response) {
+      console.error(JSON.stringify(error.response.data));
+    } else {
+      console.error(error);
+    }
+    console.error('--- FIN ERROR ---');
+    throw error;
   }
-  throw new Error('No se pudo obtener el balance.');
 }
 
 module.exports = {
-  bingXRequest,
   getUSDTBalance,
-  placeOrder
+  placeOrder,
+  normalizeSymbol
 };
+
 
