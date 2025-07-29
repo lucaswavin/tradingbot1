@@ -1,23 +1,17 @@
-// src/server.js
 const express = require('express');
 const dotenv = require('dotenv');
 dotenv.config();
 
-const webhookRoutes = require('../routes/webhook');
 const dashboardRoutes = require('../routes/dashboard');
+const webhookRoutes = require('../routes/webhook'); // crea este archivo para tus webhooks
 
 const app = express();
-
-// Para guardar señales globalmente
 if (!global.botState) global.botState = { signals: [] };
-
 app.use(express.json());
 
-// Rutas principales
-app.use('/webhook', webhookRoutes);     // (Asume que ya tienes routes/webhook.js)
-app.use('/', dashboardRoutes);          // Dashboard visual en "/"
+app.use('/webhook', webhookRoutes);
+app.use('/', dashboardRoutes);
 
-// 404 genérico
 app.use((req, res) => {
   res.status(404).send('<h2>404 - No encontrado</h2>');
 });
