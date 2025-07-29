@@ -15,31 +15,19 @@ function normalizeSymbol(symbol) {
   return base;
 }
 
-// Firma los parámetros alfabéticamente para BingX (por body, no por URL)
-function createSignature(payload) {
-  const keys = Object.keys(payload).sort();
-  const paramStr = keys.map(key => `${key}=${payload[key]}`).join('&');
-  return crypto.createHmac('sha256', API_SECRET).update(paramStr).digest('hex');
-}
-
 // Calcula el tamaño de contrato para mover 1 USDT en el par
 async function calcularEntrustVolume1USDT(symbol) {
-  // 1. Obtiene el precio actual usando la API de BingX
   const priceData = await axios.get(`https://${HOST}/openApi/swap/v2/quote/price?symbol=${symbol}`);
   const price = parseFloat(priceData.data.data.price);
 
-  // 2. Calcula el tamaño de contrato equivalente a 1 USDT
+  // Por defecto, el mínimo en BingX suele ser 0.01, pero puede cambiar según el par
   let volume = 1 / price;
-
-  // 3. Ajusta al tickSize mínimo (puedes consultar la API de contratos si necesitas ser exacto)
-  // Aquí por defecto usamos 0.01, ajusta si lo necesitas
   const tickSize = 0.01;
   volume = Math.max(tickSize, Math.floor(volume / tickSize) * tickSize);
 
-  return volume.toFixed(2);
+  return volume.toFixed(2); // Ajusta los decimales según el par si hace falta
 }
 
-// Crea una orden de mercado para mover 1 USDT en el par
 async function placeOrder({ symbol, side, leverage = 5, positionMode = 'ISOLATED' }) {
   symbol = normalizeSymbol(symbol);
 
@@ -52,33 +40,41 @@ async function placeOrder({ symbol, side, leverage = 5, positionMode = 'ISOLATED
     positionSide: side.toUpperCase() === 'BUY' ? 'LONG' : 'SHORT',
     marginMode: positionMode.toUpperCase(),
     leverage: leverage.toString(),
-    entrustType: 1, // market
-    entrustVolume,
-    timestamp: Date.now()
+    entrustType: 1, // 1 = market
+    entrustVolume
   };
 
-  // Firma correcta (alfabético, todos los params, incluido timestamp)
-  const signature = createSignature(payload);
-  payload.signature = signature;
+  const timestamp = Date.now();
+  let paramStr = "";
+  for (const key in payload) {
+    paramStr += key + "=" + payload[key] + "&";
+  }
+  paramStr += "timestamp=" + timestamp;
+  const signature = crypto.createHmac('sha256', API_SECRET).update(paramStr).digest('hex');
+  let paramStrUrl = "";
+  for (const key in payload) {
+    paramStrUrl += key + "=" + encodeURIComponent(payload[key]) + "&";
+  }
+  paramStrUrl += "timestamp=" + timestamp;
+  const url = `https://${HOST}/openApi/swap/v2/trade/order?${paramStrUrl}&signature=${signature}`;
 
   const config = {
     method: 'POST',
-    url: `https://${HOST}/openApi/swap/v2/trade/order`,
+    url: url,
     headers: {
       'X-BX-APIKEY': API_KEY,
       'Content-Type': 'application/json'
-    },
-    data: payload
+    }
   };
 
   // Logs para debug
-  console.log("🌐 FULL URL:", config.url);
-  console.log("🔐 Body (payload):", JSON.stringify(payload));
+  console.log("🌐 FULL URL:", url);
+  console.log("🔐 Query a firmar:", paramStr);
   console.log("🟡 Headers:", config.headers);
 
   try {
     const resp = await axios(config);
-    console.log('✅ BingX ORDER status:', resp.status);
+    console.log(resp.status);
     console.log(resp.data);
     return resp.data;
   } catch (error) {
@@ -96,52 +92,7 @@ async function placeOrder({ symbol, side, leverage = 5, positionMode = 'ISOLATED
   }
 }
 
-// Consulta el balance de USDT
-async function getUSDTBalance() {
-  const payload = { timestamp: Date.now() };
-  const signature = createSignature(payload);
-  payload.signature = signature;
-
-  const config = {
-    method: 'GET',
-    url: `https://${HOST}/openApi/swap/v2/user/balance`,
-    headers: {
-      'X-BX-APIKEY': API_KEY,
-      'Content-Type': 'application/json'
-    },
-    params: payload
-  };
-
-  try {
-    const resp = await axios(config);
-    console.log('===== RESPUESTA REAL BINGX BALANCE =====');
-    console.log(JSON.stringify(resp.data));
-    console.log('========================================');
-    if (resp.data && resp.data.code === 0 && resp.data.data) {
-      if (resp.data.data.balance && typeof resp.data.data.balance === 'object') {
-        return Number(resp.data.data.balance.balance);
-      }
-      if (Array.isArray(resp.data.data)) {
-        const usdt = resp.data.data.find(item => item.asset === 'USDT');
-        if (usdt) return Number(usdt.balance);
-        else return 0;
-      }
-    }
-    throw new Error('No se pudo obtener el balance.');
-  } catch (error) {
-    console.error('--- BingX API ERROR EN getUSDTBalance ---');
-    if (error.response) {
-      console.error(JSON.stringify(error.response.data));
-    } else {
-      console.error(error);
-    }
-    console.error('--- FIN ERROR ---');
-    throw error;
-  }
-}
-
 module.exports = {
-  getUSDTBalance,
   placeOrder,
   normalizeSymbol
 };
