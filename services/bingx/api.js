@@ -63,7 +63,6 @@ async function getUSDTBalance() {
   if (res && res.code === 0 && res.data) {
     // Caso 1: formato objeto
     if (res.data.balance && typeof res.data.balance === 'object') {
-      // El balance USDT está aquí
       return Number(res.data.balance.balance);
     }
     // Caso 2: formato array
@@ -73,12 +72,30 @@ async function getUSDTBalance() {
       else return 0;
     }
   }
-  // Si llega aquí, el formato no es soportado o es error
   throw new Error('No se pudo obtener el balance.');
 }
 
+// ---- AÑADE AQUÍ LA FUNCIÓN placeOrder ----
+async function placeOrder({ symbol, side, quantity, leverage = 5, positionMode = 'isolated' }) {
+  const params = {
+    symbol,
+    side: side.toUpperCase(),         
+    positionSide: side === 'buy' ? 'LONG' : 'SHORT', 
+    marginMode: positionMode,         
+    leverage: leverage.toString(),    
+    entrustType: 1,                   // 1 = market order
+    entrustPrice: '',                 
+    entrustVolume: quantity.toString(),
+    source: "API"
+  };
+  // endpoint POST para crear orden
+  return await bingXRequest('/openApi/swap/v2/trade/order', params, 'POST');
+}
+// ---- FIN FUNCIÓN placeOrder ----
+
 module.exports = {
   bingXRequest,
-  getUSDTBalance
+  getUSDTBalance,
+  placeOrder
 };
 
