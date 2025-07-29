@@ -1,10 +1,40 @@
-exports.handleWebhook = async (req, res) => {
-  const data = req.body;
-  if (!global.botState) global.botState = { signals: [] };
-  global.botState.signals.push({
-    ...data,
-    timestamp: new Date().toLocaleString()
-  });
-  res.json({ success: true, message: 'Señal recibida', data });
-};
+require('dotenv').config();
+const { placeOrder } = require('../services/bingx/api');
+const { validarSenal } = require('../services/strategies/miEstrategia');
 
+async function handleTradingViewWebhook(req, res) {
+  const { symbol, side, webhook_secret } = req.body;
+
+  if (webhook_secret !== process.env.WEBHOOK_SECRET) {
+    return res.status(401).json({ ok: false, msg: 'Webhook secret inválido' });
+  }
+
+  // Lógica de validación de estrategia
+  if (!validarSenal(req.body)) {
+    return res.status(200).json({ ok: false, msg: 'Señal ignorada por estrategia' });
+  }
+
+  const quantity = 1;          // Siempre 1 USDT, fijo
+  const leverage = 5;          // Apalancamiento fijo
+  const positionMode = 'isolated'; // Modo "isolated" fijo
+
+  try {
+    const response = await placeOrder({
+      symbol,
+      side,
+      quantity,
+      leverage,
+      positionMode
+    });
+
+    if (response && response.code === 0) {
+      return res.json({ ok: true, msg: 'Trade abierto en BingX', data: response.data });
+    } else {
+      return res.status(400).json({ ok: false, msg: 'Error BingX', data: response });
+    }
+  } catch (err) {
+    return res.status(500).json({ ok: false, msg: 'Error en el bot', error: err.message });
+  }
+}
+
+module.exports = { handleTradingViewWebhook };
