@@ -15,19 +15,11 @@ function normalizeSymbol(symbol) {
   return base;
 }
 
-// Construye los parámetros para la firma y la url
-function getParameters(payload, timestamp, urlEncode = false) {
-  let parameters = "";
-  const keys = Object.keys(payload).filter(k => payload[k] !== undefined && payload[k] !== '');
-  for (const key of keys) {
-    if (urlEncode) {
-      parameters += key + "=" + encodeURIComponent(payload[key]) + "&";
-    } else {
-      parameters += key + "=" + payload[key] + "&";
-    }
-  }
-  parameters += "timestamp=" + timestamp;
-  return parameters;
+// Firma los parámetros alfabéticamente para BingX (por body, no por URL)
+function createSignature(payload) {
+  const keys = Object.keys(payload).sort();
+  const paramStr = keys.map(key => `${key}=${payload[key]}`).join('&');
+  return crypto.createHmac('sha256', API_SECRET).update(paramStr).digest('hex');
 }
 
 // Calcula el tamaño de contrato para mover 1 USDT en el par
@@ -39,13 +31,15 @@ async function calcularEntrustVolume1USDT(symbol) {
   // 2. Calcula el tamaño de contrato equivalente a 1 USDT
   let volume = 1 / price;
 
-  // 3. Redondea al tickSize mínimo (0.01 suele ser el mínimo, pero puedes consultar la API de contratos)
+  // 3. Ajusta al tickSize mínimo (puedes consultar la API de contratos si necesitas ser exacto)
+  // Aquí por defecto usamos 0.01, ajusta si lo necesitas
   const tickSize = 0.01;
   volume = Math.max(tickSize, Math.floor(volume / tickSize) * tickSize);
 
-  return volume.toFixed(2); // Ajusta los decimales según el par
+  return volume.toFixed(2);
 }
 
+// Crea una orden de mercado para mover 1 USDT en el par
 async function placeOrder({ symbol, side, leverage = 5, positionMode = 'ISOLATED' }) {
   symbol = normalizeSymbol(symbol);
 
@@ -59,32 +53,32 @@ async function placeOrder({ symbol, side, leverage = 5, positionMode = 'ISOLATED
     marginMode: positionMode.toUpperCase(),
     leverage: leverage.toString(),
     entrustType: 1, // market
-    entrustVolume
+    entrustVolume,
+    timestamp: Date.now()
   };
 
-  const timestamp = Date.now();
-  const paramStr = getParameters(payload, timestamp, false); // para la firma
-  const signature = crypto.createHmac('sha256', API_SECRET).update(paramStr).digest('hex');
-  const paramStrUrl = getParameters(payload, timestamp, true); // para la url
-  const url = `https://${HOST}/openApi/swap/v2/trade/order?${paramStrUrl}&signature=${signature}`;
+  // Firma correcta (alfabético, todos los params, incluido timestamp)
+  const signature = createSignature(payload);
+  payload.signature = signature;
 
   const config = {
     method: 'POST',
-    url: url,
+    url: `https://${HOST}/openApi/swap/v2/trade/order`,
     headers: {
       'X-BX-APIKEY': API_KEY,
       'Content-Type': 'application/json'
-    }
+    },
+    data: payload
   };
 
   // Logs para debug
-  console.log("🌐 FULL URL:", url);
-  console.log("🔐 Query a firmar:", paramStr);
+  console.log("🌐 FULL URL:", config.url);
+  console.log("🔐 Body (payload):", JSON.stringify(payload));
   console.log("🟡 Headers:", config.headers);
 
   try {
     const resp = await axios(config);
-    console.log(resp.status);
+    console.log('✅ BingX ORDER status:', resp.status);
     console.log(resp.data);
     return resp.data;
   } catch (error) {
@@ -102,20 +96,20 @@ async function placeOrder({ symbol, side, leverage = 5, positionMode = 'ISOLATED
   }
 }
 
-// BALANCE igual que antes
+// Consulta el balance de USDT
 async function getUSDTBalance() {
-  const timestamp = Date.now();
-  const paramStr = `timestamp=${timestamp}`;
-  const signature = crypto.createHmac('sha256', API_SECRET).update(paramStr).digest('hex');
-  const url = `https://${HOST}/openApi/swap/v2/user/balance?timestamp=${timestamp}&signature=${signature}`;
+  const payload = { timestamp: Date.now() };
+  const signature = createSignature(payload);
+  payload.signature = signature;
 
   const config = {
     method: 'GET',
-    url: url,
+    url: `https://${HOST}/openApi/swap/v2/user/balance`,
     headers: {
       'X-BX-APIKEY': API_KEY,
       'Content-Type': 'application/json'
-    }
+    },
+    params: payload
   };
 
   try {
@@ -151,5 +145,6 @@ module.exports = {
   placeOrder,
   normalizeSymbol
 };
+
 
 
