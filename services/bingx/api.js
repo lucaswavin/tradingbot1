@@ -15,17 +15,35 @@ function normalizeSymbol(symbol) {
   return base;
 }
 
+// Construye los parámetros para la firma y la url
+function getParameters(payload, timestamp, urlEncode = false) {
+  let parameters = "";
+  const keys = Object.keys(payload).filter(k => payload[k] !== undefined && payload[k] !== '');
+  for (const key of keys) {
+    if (urlEncode) {
+      parameters += key + "=" + encodeURIComponent(payload[key]) + "&";
+    } else {
+      parameters += key + "=" + payload[key] + "&";
+    }
+  }
+  parameters += "timestamp=" + timestamp;
+  return parameters;
+}
+
 // Calcula el tamaño de contrato para mover 1 USDT en el par
 async function calcularEntrustVolume1USDT(symbol) {
+  // 1. Obtiene el precio actual usando la API de BingX
   const priceData = await axios.get(`https://${HOST}/openApi/swap/v2/quote/price?symbol=${symbol}`);
   const price = parseFloat(priceData.data.data.price);
 
-  // Por defecto, el mínimo en BingX suele ser 0.01, pero puede cambiar según el par
+  // 2. Calcula el tamaño de contrato equivalente a 1 USDT
   let volume = 1 / price;
+
+  // 3. Redondea al tickSize mínimo (0.01 suele ser el mínimo)
   const tickSize = 0.01;
   volume = Math.max(tickSize, Math.floor(volume / tickSize) * tickSize);
 
-  return volume.toFixed(2); // Ajusta los decimales según el par si hace falta
+  return volume.toFixed(2); // Ajusta los decimales según el par
 }
 
 async function placeOrder({ symbol, side, leverage = 5, positionMode = 'ISOLATED' }) {
@@ -40,22 +58,14 @@ async function placeOrder({ symbol, side, leverage = 5, positionMode = 'ISOLATED
     positionSide: side.toUpperCase() === 'BUY' ? 'LONG' : 'SHORT',
     marginMode: positionMode.toUpperCase(),
     leverage: leverage.toString(),
-    entrustType: 1, // 1 = market
+    entrustType: 1, // market
     entrustVolume
   };
 
   const timestamp = Date.now();
-  let paramStr = "";
-  for (const key in payload) {
-    paramStr += key + "=" + payload[key] + "&";
-  }
-  paramStr += "timestamp=" + timestamp;
+  const paramStr = getParameters(payload, timestamp, false); // para la firma
   const signature = crypto.createHmac('sha256', API_SECRET).update(paramStr).digest('hex');
-  let paramStrUrl = "";
-  for (const key in payload) {
-    paramStrUrl += key + "=" + encodeURIComponent(payload[key]) + "&";
-  }
-  paramStrUrl += "timestamp=" + timestamp;
+  const paramStrUrl = getParameters(payload, timestamp, true); // para la url
   const url = `https://${HOST}/openApi/swap/v2/trade/order?${paramStrUrl}&signature=${signature}`;
 
   const config = {
@@ -92,10 +102,52 @@ async function placeOrder({ symbol, side, leverage = 5, positionMode = 'ISOLATED
   }
 }
 
+// BALANCE
+async function getUSDTBalance() {
+  const timestamp = Date.now();
+  const paramStr = `timestamp=${timestamp}`;
+  const signature = crypto.createHmac('sha256', API_SECRET).update(paramStr).digest('hex');
+  const url = `https://${HOST}/openApi/swap/v2/user/balance?timestamp=${timestamp}&signature=${signature}`;
+
+  const config = {
+    method: 'GET',
+    url: url,
+    headers: {
+      'X-BX-APIKEY': API_KEY,
+      'Content-Type': 'application/json'
+    }
+  };
+
+  try {
+    const resp = await axios(config);
+    console.log('===== RESPUESTA REAL BINGX BALANCE =====');
+    console.log(JSON.stringify(resp.data));
+    console.log('========================================');
+    if (resp.data && resp.data.code === 0 && resp.data.data) {
+      if (resp.data.data.balance && typeof resp.data.data.balance === 'object') {
+        return Number(resp.data.data.balance.balance);
+      }
+      if (Array.isArray(resp.data.data)) {
+        const usdt = resp.data.data.find(item => item.asset === 'USDT');
+        if (usdt) return Number(usdt.balance);
+        else return 0;
+      }
+    }
+    throw new Error('No se pudo obtener el balance.');
+  } catch (error) {
+    console.error('--- BingX API ERROR EN getUSDTBalance ---');
+    if (error.response) {
+      console.error(JSON.stringify(error.response.data));
+    } else {
+      console.error(error);
+    }
+    console.error('--- FIN ERROR ---');
+    throw error;
+  }
+}
+
 module.exports = {
+  getUSDTBalance,
   placeOrder,
   normalizeSymbol
 };
-
-
-
