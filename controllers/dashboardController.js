@@ -17,7 +17,7 @@ exports.dashboard = async (req, res) => {
   res.send(`
     <html>
       <head>
-        <title>🤖 Trading Bot + BingX</title>
+        <title>Trading Bot + BingX</title>
         <meta charset="UTF-8" />
         <style>
           body { font-family: Arial, sans-serif; max-width: 700px; margin: 40px auto; background: #f5f5f5; }
@@ -65,3 +65,9 @@ exports.dashboard = async (req, res) => {
     </html>
   `);
 };
+
+exports.refreshBalance = async (req, res) => {
+  await getUSDTBalance();
+  res.redirect('/');
+};
+
