@@ -32,21 +32,30 @@ function getParameters(payload, timestamp, urlEncode = false) {
 
 // Calcula el tamaño de contrato para mover 1 USDT en el par
 async function calcularEntrustVolume1USDT(symbol) {
-  // 1. Obtiene el precio actual usando la API de BingX
-  const priceData = await axios.get(`https://${HOST}/openApi/swap/v2/quote/price?symbol=${symbol}`);
-  const price = parseFloat(priceData.data.data.price);
+  try {
+    // 1. Obtiene el precio actual usando la API de BingX
+    const priceData = await axios.get(`https://${HOST}/openApi/swap/v2/quote/price?symbol=${symbol}`);
+    const price = parseFloat(priceData.data.data.price);
 
-  // 2. Calcula el tamaño de contrato equivalente a 1 USDT
-  let volume = 1 / price;
+    // 2. Calcula el tamaño de contrato equivalente a 1 USDT
+    let volume = 1 / price;
 
-  // 3. Redondea al tickSize mínimo (0.01 suele ser el mínimo)
-  const tickSize = 0.01;
-  volume = Math.max(tickSize, Math.floor(volume / tickSize) * tickSize);
+    // 3. Redondea al tickSize mínimo (0.01 suele ser el mínimo)
+    const tickSize = 0.01;
+    volume = Math.max(tickSize, Math.floor(volume / tickSize) * tickSize);
 
-  return volume.toFixed(2); // Ajusta los decimales según el par
+    return volume.toFixed(2); // Ajusta los decimales según el par
+  } catch (error) {
+    console.error('Error calculando volumen:', error.message);
+    return "0.01"; // Valor por defecto mínimo
+  }
 }
 
 async function placeOrder({ symbol, side, leverage = 5, positionMode = 'ISOLATED' }) {
+  if (!API_KEY || !API_SECRET) {
+    throw new Error('BingX API keys no configuradas');
+  }
+
   symbol = normalizeSymbol(symbol);
 
   // Calcula el tamaño de contrato para 1 USDT
@@ -84,7 +93,7 @@ async function placeOrder({ symbol, side, leverage = 5, positionMode = 'ISOLATED
 
   try {
     const resp = await axios(config);
-    console.log(resp.status);
+    console.log('✅ Orden ejecutada:', resp.status);
     console.log(resp.data);
     return resp.data;
   } catch (error) {
@@ -102,8 +111,12 @@ async function placeOrder({ symbol, side, leverage = 5, positionMode = 'ISOLATED
   }
 }
 
-// BALANCE
+// BALANCE - Función mejorada
 async function getUSDTBalance() {
+  if (!API_KEY || !API_SECRET) {
+    throw new Error('BingX API keys no configuradas');
+  }
+
   const timestamp = Date.now();
   const paramStr = `timestamp=${timestamp}`;
   const signature = crypto.createHmac('sha256', API_SECRET).update(paramStr).digest('hex');
@@ -123,13 +136,15 @@ async function getUSDTBalance() {
     console.log('===== RESPUESTA REAL BINGX BALANCE =====');
     console.log(JSON.stringify(resp.data));
     console.log('========================================');
+    
     if (resp.data && resp.data.code === 0 && resp.data.data) {
+      // Maneja diferentes formatos de respuesta
       if (resp.data.data.balance && typeof resp.data.data.balance === 'object') {
-        return Number(resp.data.data.balance.balance);
+        return Number(resp.data.data.balance.balance || 0);
       }
       if (Array.isArray(resp.data.data)) {
         const usdt = resp.data.data.find(item => item.asset === 'USDT');
-        if (usdt) return Number(usdt.balance);
+        if (usdt) return Number(usdt.balance || 0);
         else return 0;
       }
     }
