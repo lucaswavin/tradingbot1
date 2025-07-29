@@ -1,4 +1,3 @@
-// controllers/dashboardController.js
 const { getUSDTBalance } = require('../services/bingx/api');
 
 exports.dashboard = async (req, res) => {
@@ -12,7 +11,6 @@ exports.dashboard = async (req, res) => {
     bingxConnected = false;
   }
 
-  // Últimas señales (modifica según dónde las guardes)
   const signals = global.botState?.signals || [];
   const lastSignals = signals.slice(-5).reverse();
 
@@ -67,4 +65,3 @@ exports.dashboard = async (req, res) => {
     </html>
   `);
 };
-
