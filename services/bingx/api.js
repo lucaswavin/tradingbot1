@@ -1,6 +1,5 @@
-// services/bingx/api.js
+const axios = require('axios');
 const crypto = require('crypto');
-const https = require('https');
 
 const BINGX_API_KEY = process.env.BINGX_API_KEY;
 const BINGX_API_SECRET = process.env.BINGX_API_SECRET;
@@ -17,24 +16,6 @@ function createBingXSignature(params) {
     .digest('hex');
 }
 
-function makeHttpRequest(url, options) {
-  return new Promise((resolve, reject) => {
-    const req = https.request(url, options, (res) => {
-      let data = '';
-      res.on('data', (chunk) => data += chunk);
-      res.on('end', () => {
-        try {
-          resolve(JSON.parse(data));
-        } catch (e) {
-          resolve({ raw: data });
-        }
-      });
-    });
-    req.on('error', reject);
-    req.end();
-  });
-}
-
 async function bingXRequest(endpoint, params = {}, method = 'GET') {
   if (!BINGX_API_KEY || !BINGX_API_SECRET) {
     throw new Error('BingX API keys no configuradas');
@@ -47,17 +28,25 @@ async function bingXRequest(endpoint, params = {}, method = 'GET') {
     .map(key => `${key}=${requestParams[key]}`)
     .join('&');
   const fullUrl = `${BINGX_BASE_URL}${endpoint}?${queryString}`;
-  const options = {
-    method,
-    headers: {
-      'X-BX-APIKEY': BINGX_API_KEY,
-      'Content-Type': 'application/json'
+  try {
+    const response = await axios({
+      url: fullUrl,
+      method,
+      headers: {
+        'X-BX-APIKEY': BINGX_API_KEY,
+        'Content-Type': 'application/json'
+      }
+    });
+    return response.data;
+  } catch (error) {
+    if (error.response) {
+      throw new Error(JSON.stringify(error.response.data));
+    } else {
+      throw error;
     }
-  };
-  return await makeHttpRequest(fullUrl, options);
+  }
 }
 
-// FUNCIÓN PRINCIPAL PARA OBTENER EL BALANCE DE USDT
 async function getUSDTBalance() {
   const res = await bingXRequest('/openApi/swap/v2/user/balance');
   if (res && Array.isArray(res.data)) {
@@ -70,6 +59,7 @@ async function getUSDTBalance() {
 }
 
 module.exports = {
+  bingXRequest,
   getUSDTBalance
 };
 
