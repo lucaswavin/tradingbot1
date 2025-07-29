@@ -1,6 +1,7 @@
 require('dotenv').config();
-const { placeOrder } = require('../services/bingx/api');
+const { placeOrder, getUSDTBalance } = require('../services/bingx/api');
 
+// Valida balance antes de operar y ejecuta la orden
 async function handleTradingViewWebhook(req, res) {
   const { symbol, side, webhook_secret } = req.body;
 
@@ -9,6 +10,12 @@ async function handleTradingViewWebhook(req, res) {
   }
 
   try {
+    // Chequea balance antes de operar
+    const balance = await getUSDTBalance();
+    if (balance < 2) {
+      return res.status(400).json({ ok: false, msg: 'Balance insuficiente para operar', balance });
+    }
+
     const response = await placeOrder({
       symbol,
       side,
@@ -27,4 +34,5 @@ async function handleTradingViewWebhook(req, res) {
 }
 
 module.exports = { handleTradingViewWebhook };
+
 
