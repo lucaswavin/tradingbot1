@@ -1,7 +1,7 @@
 const express = require('express');
 const router = express.Router();
-const webhookController = require('../controllers/webhookController');
+const { handleTradingViewWebhook } = require('../controllers/webhookController');
 
-router.post('/', webhookController.handleTradingViewWebhook);
+router.post('/webhook', handleTradingViewWebhook);
 
 module.exports = router;
