@@ -1,7 +1,11 @@
 const express = require('express');
 const router = express.Router();
-const { handleTradingViewWebhook } = require('../controllers/webhookController');
+const webhookController = require('../controllers/webhookController');
 
-router.post('/webhook', handleTradingViewWebhook);
+// Ruta para señales que solo se muestran en dashboard (webhook original)
+router.post('/', webhookController.handleWebhook);
+
+// Ruta para trading automático con BingX
+router.post('/trade', webhookController.handleTradingViewWebhook);
 
 module.exports = router;
