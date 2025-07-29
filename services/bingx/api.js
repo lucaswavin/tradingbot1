@@ -5,158 +5,364 @@ const API_KEY = process.env.BINGX_API_KEY;
 const API_SECRET = process.env.BINGX_API_SECRET;
 const HOST = "open-api.bingx.com";
 
+console.log('🔑 BingX API Keys configuradas:', {
+  apiKey: API_KEY ? `${API_KEY.substring(0, 8)}...` : 'NO CONFIGURADA',
+  secret: API_SECRET ? `${API_SECRET.substring(0, 8)}...` : 'NO CONFIGURADA'
+});
+
 // Normaliza el symbol de TradingView a BingX
 function normalizeSymbol(symbol) {
   if (!symbol) return symbol;
+  
+  console.log(`🔄 Normalizando símbolo: ${symbol}`);
+  
   let base = symbol.replace('.P', '');
-  if (base.endsWith('USDT')) {
+  // BingX usa formato como BTC-USDT para perpetuos
+  if (base.endsWith('USDT') && !base.includes('-')) {
     base = base.replace(/USDT$/, '-USDT');
   }
+  
+  console.log(`✅ Símbolo normalizado: ${symbol} → ${base}`);
   return base;
 }
 
-// Construye los parámetros para la firma y la url
-function getParameters(payload, timestamp, urlEncode = false) {
-  let parameters = "";
-  const keys = Object.keys(payload).filter(k => payload[k] !== undefined && payload[k] !== '');
-  for (const key of keys) {
-    if (urlEncode) {
-      parameters += key + "=" + encodeURIComponent(payload[key]) + "&";
-    } else {
-      parameters += key + "=" + payload[key] + "&";
-    }
-  }
-  parameters += "timestamp=" + timestamp;
-  return parameters;
+// Construye query string ordenado para firma
+function buildQueryString(params) {
+  const filtered = Object.keys(params)
+    .filter(key => params[key] !== undefined && params[key] !== '')
+    .sort(); // IMPORTANTE: orden alfabético para la firma
+  
+  console.log('📝 Claves ordenadas para firma:', filtered);
+  
+  const queryString = filtered
+    .map(key => `${key}=${params[key]}`)
+    .join('&');
+    
+  console.log('🔗 Query string construido:', queryString);
+  return queryString;
 }
 
-// Calcula el tamaño de contrato para mover 1 USDT en el par
-async function calcularEntrustVolume1USDT(symbol) {
+// Función para obtener el precio actual
+async function getCurrentPrice(symbol) {
+  console.log(`💰 Obteniendo precio actual para: ${symbol}`);
+  
   try {
-    // 1. Obtiene el precio actual usando la API de BingX
-    const priceData = await axios.get(`https://${HOST}/openApi/swap/v2/quote/price?symbol=${symbol}`);
-    const price = parseFloat(priceData.data.data.price);
-
-    // 2. Calcula el tamaño de contrato equivalente a 1 USDT
-    let volume = 1 / price;
-
-    // 3. Redondea al tickSize mínimo (0.01 suele ser el mínimo)
-    const tickSize = 0.01;
-    volume = Math.max(tickSize, Math.floor(volume / tickSize) * tickSize);
-
-    return volume.toFixed(2); // Ajusta los decimales según el par
+    const url = `https://${HOST}/openApi/swap/v2/quote/price?symbol=${symbol}`;
+    console.log(`🌐 URL precio: ${url}`);
+    
+    const response = await axios.get(url);
+    console.log('📊 Respuesta precio completa:', JSON.stringify(response.data, null, 2));
+    
+    if (response.data && response.data.code === 0) {
+      const price = parseFloat(response.data.data.price);
+      console.log(`✅ Precio obtenido: ${price} USDT`);
+      return price;
+    }
+    
+    throw new Error(`Error en respuesta: ${JSON.stringify(response.data)}`);
   } catch (error) {
-    console.error('Error calculando volumen:', error.message);
-    return "0.01"; // Valor por defecto mínimo
+    console.error('❌ Error obteniendo precio:', error.message);
+    if (error.response) {
+      console.error('📄 Datos de error:', error.response.data);
+    }
+    throw error;
   }
 }
 
-async function placeOrder({ symbol, side, leverage = 5, positionMode = 'ISOLATED' }) {
+// Calcula quantity basado en USDT a invertir
+async function calculateQuantity(symbol, usdtAmount = 5) {
+  console.log(`🧮 Calculando quantity para ${symbol} con ${usdtAmount} USDT`);
+  
+  try {
+    const price = await getCurrentPrice(symbol);
+    
+    // Para contratos perpetuos, quantity es el número de contratos
+    // Cada contrato vale 1 USD del activo base
+    let quantity = usdtAmount / price;
+    
+    console.log(`📐 Quantity inicial calculada: ${quantity}`);
+    
+    // Redondear a 3 decimales (ajustar según el símbolo)
+    quantity = Math.round(quantity * 1000) / 1000;
+    
+    // Mínimo 0.001 para la mayoría de pares
+    quantity = Math.max(0.001, quantity);
+    
+    console.log(`💡 Quantity final: ${quantity} contratos (precio: ${price} USDT)`);
+    return quantity;
+  } catch (error) {
+    console.error('❌ Error calculando quantity:', error.message);
+    console.log('🔄 Usando quantity por defecto: 0.001');
+    return 0.001; // Cantidad mínima por defecto
+  }
+}
+
+// Establecer leverage
+async function setLeverage(symbol, leverage = 5) {
+  console.log(`🔧 Estableciendo leverage ${leverage}x para ${symbol}`);
+  
   if (!API_KEY || !API_SECRET) {
     throw new Error('BingX API keys no configuradas');
   }
 
-  symbol = normalizeSymbol(symbol);
-
-  // Calcula el tamaño de contrato para 1 USDT
-  const entrustVolume = await calcularEntrustVolume1USDT(symbol);
-
-  const payload = {
-    symbol,
-    side: side.toUpperCase(),
-    positionSide: side.toUpperCase() === 'BUY' ? 'LONG' : 'SHORT',
-    marginMode: positionMode.toUpperCase(),
-    leverage: leverage.toString(),
-    entrustType: 1, // market
-    entrustVolume
-  };
-
   const timestamp = Date.now();
-  const paramStr = getParameters(payload, timestamp, false); // para la firma
-  const signature = crypto.createHmac('sha256', API_SECRET).update(paramStr).digest('hex');
-  const paramStrUrl = getParameters(payload, timestamp, true); // para la url
-  const url = `https://${HOST}/openApi/swap/v2/trade/order?${paramStrUrl}&signature=${signature}`;
-
-  const config = {
-    method: 'POST',
-    url: url,
-    headers: {
-      'X-BX-APIKEY': API_KEY,
-      'Content-Type': 'application/json'
-    }
+  const params = {
+    leverage: leverage,
+    symbol: symbol,
+    timestamp: timestamp
   };
 
-  // Logs para debug
-  console.log("🌐 FULL URL:", url);
-  console.log("🔐 Query a firmar:", paramStr);
-  console.log("🟡 Headers:", config.headers);
+  console.log('📋 Parámetros leverage:', params);
+
+  const queryString = buildQueryString(params);
+  const signature = crypto.createHmac('sha256', API_SECRET).update(queryString).digest('hex');
+  
+  console.log('🔐 Firma generada para leverage:', signature.substring(0, 16) + '...');
+  
+  const finalParams = { ...params, signature };
+  const url = `https://${HOST}/openApi/swap/v2/trade/leverage`;
+  
+  console.log('🌐 URL leverage:', url);
+  console.log('📤 Parámetros finales leverage:', finalParams);
 
   try {
-    const resp = await axios(config);
-    console.log('✅ Orden ejecutada:', resp.status);
-    console.log(resp.data);
-    return resp.data;
+    const response = await axios.post(url, null, {
+      params: finalParams,
+      headers: {
+        'X-BX-APIKEY': API_KEY,
+        'Content-Type': 'application/json'
+      }
+    });
+
+    console.log('✅ Leverage establecido exitosamente:', JSON.stringify(response.data, null, 2));
+    return response.data;
   } catch (error) {
+    // No fallar si el leverage ya está establecido
+    console.warn('⚠️ Advertencia estableciendo leverage:', error.response?.data?.msg || error.message);
     if (error.response) {
-      console.error('--- BingX API ERROR EN placeOrder ---');
-      console.error(JSON.stringify(error.response.data));
-      console.error('--- FIN ERROR ---');
-      return error.response.data;
+      console.warn('📄 Datos del error leverage:', JSON.stringify(error.response.data, null, 2));
+    }
+    return null;
+  }
+}
+
+// Función principal para colocar orden
+async function placeOrder({ symbol, side, leverage = 5, usdtAmount = 5 }) {
+  console.log('\n🚀 ===== INICIANDO ORDEN =====');
+  console.log(`📊 Parámetros recibidos:`, { symbol, side, leverage, usdtAmount });
+  
+  if (!API_KEY || !API_SECRET) {
+    throw new Error('BingX API keys no configuradas');
+  }
+
+  const normalizedSymbol = normalizeSymbol(symbol);
+  console.log(`🎯 Procesando orden: ${side.toUpperCase()} ${normalizedSymbol}`);
+
+  try {
+    // 1. Establecer leverage
+    console.log('\n--- PASO 1: Establecer Leverage ---');
+    await setLeverage(normalizedSymbol, leverage);
+
+    // 2. Calcular quantity
+    console.log('\n--- PASO 2: Calcular Quantity ---');
+    const quantity = await calculateQuantity(normalizedSymbol, usdtAmount);
+
+    // 3. Preparar parámetros según documentación BingX
+    console.log('\n--- PASO 3: Preparar Orden ---');
+    const timestamp = Date.now();
+    const orderSide = side.toUpperCase();
+    
+    const params = {
+      positionSide: orderSide === 'BUY' ? 'LONG' : 'SHORT',
+      quantity: quantity,
+      side: orderSide,
+      symbol: normalizedSymbol,
+      timestamp: timestamp,
+      type: 'MARKET'
+    };
+
+    console.log('📋 Parámetros de orden preparados:', params);
+
+    // 4. Crear firma
+    console.log('\n--- PASO 4: Crear Firma ---');
+    const queryString = buildQueryString(params);
+    const signature = crypto.createHmac('sha256', API_SECRET).update(queryString).digest('hex');
+    
+    console.log('🔐 Query para firma:', queryString);
+    console.log('🔐 Firma generada:', signature.substring(0, 16) + '...');
+    
+    // 5. URL final con todos los parámetros
+    const finalQueryString = `${queryString}&signature=${signature}`;
+    const url = `https://${HOST}/openApi/swap/v2/trade/order?${finalQueryString}`;
+
+    console.log('\n--- PASO 5: Ejecutar Orden ---');
+    console.log('🌐 URL completa:', url);
+
+    // 6. Ejecutar orden
+    const response = await axios.post(url, null, {
+      headers: {
+        'X-BX-APIKEY': API_KEY,
+        'Content-Type': 'application/json'
+      }
+    });
+
+    console.log('\n✅ ===== ORDEN EJECUTADA =====');
+    console.log('📈 Status:', response.status);
+    console.log('🎉 Respuesta BingX:', JSON.stringify(response.data, null, 2));
+    console.log('===========================\n');
+    
+    return response.data;
+
+  } catch (error) {
+    console.log('\n❌ ===== ERROR EN ORDEN =====');
+    console.error('💥 Error en placeOrder:', error.message);
+    
+    if (error.response) {
+      console.error('📊 Status HTTP:', error.response.status);
+      console.error('🔍 Headers respuesta:', error.response.headers);
+      console.error('📄 Datos del error:', JSON.stringify(error.response.data, null, 2));
+      
+      return {
+        success: false,
+        error: error.response.data,
+        code: error.response.status,
+        message: error.response.data?.msg || 'Error desconocido'
+      };
     } else {
-      console.error('--- BingX API ERROR: NO RESPONSE ---');
-      console.error(error);
-      console.error('--- FIN ERROR ---');
+      console.error('🌐 Error de red:', error.message);
+      console.log('============================\n');
       throw error;
     }
   }
 }
 
-// BALANCE - Función mejorada
+// Función para obtener balance
 async function getUSDTBalance() {
+  console.log('\n💰 ===== OBTENIENDO BALANCE =====');
+  
   if (!API_KEY || !API_SECRET) {
     throw new Error('BingX API keys no configuradas');
   }
 
   const timestamp = Date.now();
-  const paramStr = `timestamp=${timestamp}`;
-  const signature = crypto.createHmac('sha256', API_SECRET).update(paramStr).digest('hex');
-  const url = `https://${HOST}/openApi/swap/v2/user/balance?timestamp=${timestamp}&signature=${signature}`;
-
-  const config = {
-    method: 'GET',
-    url: url,
-    headers: {
-      'X-BX-APIKEY': API_KEY,
-      'Content-Type': 'application/json'
-    }
-  };
+  const params = { timestamp };
+  
+  console.log('📋 Parámetros balance:', params);
+  
+  const queryString = buildQueryString(params);
+  const signature = crypto.createHmac('sha256', API_SECRET).update(queryString).digest('hex');
+  
+  console.log('🔐 Firma balance:', signature.substring(0, 16) + '...');
+  
+  const url = `https://${HOST}/openApi/swap/v2/user/balance?${queryString}&signature=${signature}`;
+  console.log('🌐 URL balance:', url);
 
   try {
-    const resp = await axios(config);
-    console.log('===== RESPUESTA REAL BINGX BALANCE =====');
-    console.log(JSON.stringify(resp.data));
-    console.log('========================================');
+    const response = await axios.get(url, {
+      headers: {
+        'X-BX-APIKEY': API_KEY,
+        'Content-Type': 'application/json'
+      }
+    });
+
+    console.log('✅ Respuesta balance completa:', JSON.stringify(response.data, null, 2));
+
+    if (response.data && response.data.code === 0) {
+      const data = response.data.data;
+      
+      console.log('🔍 Analizando estructura del balance...');
+      
+      // Manejar diferentes formatos de respuesta
+      if (data && data.balance) {
+        console.log('📊 Formato detectado: objeto con balance');
+        // Formato: { balance: { balance: "123.45", availableMargin: "..." } }
+        if (typeof data.balance === 'object' && data.balance.balance) {
+          const balance = parseFloat(data.balance.balance);
+          console.log(`💵 Balance extraído (objeto): ${balance} USDT`);
+          return balance;
+        }
+        // Formato: { balance: "123.45" }
+        if (typeof data.balance === 'string') {
+          const balance = parseFloat(data.balance);
+          console.log(`💵 Balance extraído (string): ${balance} USDT`);
+          return balance;
+        }
+      }
+      
+      // Formato array: [{ asset: "USDT", balance: "123.45" }]
+      if (Array.isArray(data)) {
+        console.log('📊 Formato detectado: array de balances');
+        console.log('🔍 Buscando USDT en array...');
+        const usdt = data.find(item => item.asset === 'USDT');
+        if (usdt) {
+          const balance = parseFloat(usdt.balance || 0);
+          console.log(`💵 Balance USDT encontrado: ${balance} USDT`);
+          return balance;
+        } else {
+          console.log('⚠️ No se encontró USDT en el array');
+          return 0;
+        }
+      }
+      
+      // Si data es directamente un número
+      if (typeof data === 'number') {
+        console.log(`💵 Balance directo: ${data} USDT`);
+        return data;
+      }
+    }
+
+    console.log('❌ Formato de respuesta no reconocido');
+    throw new Error(`Formato de respuesta inesperado: ${JSON.stringify(response.data)}`);
     
-    if (resp.data && resp.data.code === 0 && resp.data.data) {
-      // Maneja diferentes formatos de respuesta
-      if (resp.data.data.balance && typeof resp.data.data.balance === 'object') {
-        return Number(resp.data.data.balance.balance || 0);
-      }
-      if (Array.isArray(resp.data.data)) {
-        const usdt = resp.data.data.find(item => item.asset === 'USDT');
-        if (usdt) return Number(usdt.balance || 0);
-        else return 0;
-      }
-    }
-    throw new Error('No se pudo obtener el balance.');
   } catch (error) {
-    console.error('--- BingX API ERROR EN getUSDTBalance ---');
+    console.log('\n❌ ===== ERROR BALANCE =====');
+    console.error('💥 Error obteniendo balance:', error.message);
     if (error.response) {
-      console.error(JSON.stringify(error.response.data));
+      console.error('📊 Status:', error.response.status);
+      console.error('📄 Data:', JSON.stringify(error.response.data, null, 2));
     } else {
-      console.error(error);
+      console.error('🌐 Error de red:', error.message);
     }
-    console.error('--- FIN ERROR ---');
+    console.log('==========================\n');
+    throw error;
+  }
+}
+
+// Función para obtener posiciones
+async function getPositions() {
+  console.log('\n📊 ===== OBTENIENDO POSICIONES =====');
+  
+  if (!API_KEY || !API_SECRET) {
+    throw new Error('BingX API keys no configuradas');
+  }
+
+  const timestamp = Date.now();
+  const params = { timestamp };
+  
+  const queryString = buildQueryString(params);
+  const signature = crypto.createHmac('sha256', API_SECRET).update(queryString).digest('hex');
+  
+  const url = `https://${HOST}/openApi/swap/v2/user/positions?${queryString}&signature=${signature}`;
+  console.log('🌐 URL posiciones:', url);
+
+  try {
+    const response = await axios.get(url, {
+      headers: {
+        'X-BX-APIKEY': API_KEY,
+        'Content-Type': 'application/json'
+      }
+    });
+
+    console.log('✅ Posiciones obtenidas:', JSON.stringify(response.data, null, 2));
+    console.log('=================================\n');
+    
+    return response.data;
+  } catch (error) {
+    console.error('❌ Error obteniendo posiciones:', error.response?.data || error.message);
+    if (error.response) {
+      console.error('📄 Datos del error:', JSON.stringify(error.response.data, null, 2));
+    }
+    console.log('=================================\n');
     throw error;
   }
 }
@@ -164,5 +370,8 @@ async function getUSDTBalance() {
 module.exports = {
   getUSDTBalance,
   placeOrder,
-  normalizeSymbol
+  normalizeSymbol,
+  setLeverage,
+  getPositions,
+  getCurrentPrice
 };
