@@ -1,13 +1,15 @@
+// routes/dashboard.js
 const express = require('express');
 const router = express.Router();
 const dashboardController = require('../controllers/dashboardController');
 
 router.get('/', dashboardController.dashboard);
 
-// Endpoint para actualizar balance manualmente (opcional)
+// Opcional: actualizar balance forzado con botón
 router.post('/api/refresh-balance', async (req, res) => {
-  // Solo refresca, luego redirige al dashboard
-  await require('../services/bingx/api').getBalance();
+  try {
+    await require('../services/bingx/api').getUSDTBalance();
+  } catch (e) {}
   res.redirect('/');
 });
 
