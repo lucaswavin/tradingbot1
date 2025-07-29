@@ -28,5 +28,3 @@ async function handleTradingViewWebhook(req, res) {
 
 module.exports = { handleTradingViewWebhook };
 
-
-
