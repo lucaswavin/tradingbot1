@@ -1,20 +1,18 @@
-const bingxService = require('../services/bingx/api');
+// controllers/dashboardController.js
+const { getUSDTBalance } = require('../services/bingx/api');
 
 exports.dashboard = async (req, res) => {
-  // Obtenemos el balance en vivo
+  let usdtBalance = '-';
   let bingxConnected = false;
-  let balance = '-';
   try {
-    const response = await bingxService.getBalance();
+    usdtBalance = await getUSDTBalance();
     bingxConnected = true;
-    // Ajusta según la estructura real de tu response
-    balance = response?.data?.balance ?? '-';
-  } catch {
+  } catch (e) {
+    usdtBalance = '-';
     bingxConnected = false;
-    balance = '-';
   }
 
-  // Señales guardadas (puedes mejorar esto)
+  // Últimas señales (modifica según dónde las guardes)
   const signals = global.botState?.signals || [];
   const lastSignals = signals.slice(-5).reverse();
 
@@ -41,7 +39,7 @@ exports.dashboard = async (req, res) => {
             <b>BingX:</b> ${bingxConnected ? 'Conectado' : 'No conectado'}
           </div>
           <div>
-            <b>Balance:</b> <span style="font-size:1.2em;">${balance} USDT</span>
+            <b>Balance:</b> <span style="font-size:1.2em;">${usdtBalance} USDT</span>
             <form method="POST" action="/api/refresh-balance" style="display:inline;">
               <button type="submit">Actualizar Balance</button>
             </form>
@@ -69,3 +67,4 @@ exports.dashboard = async (req, res) => {
     </html>
   `);
 };
+
