@@ -1,15 +1,39 @@
 const axios = require('axios');
 const crypto = require('crypto');
+const https = require('https');
 
 const API_KEY = process.env.BINGX_API_KEY;
 const API_SECRET = process.env.BINGX_API_SECRET;
 const HOST = "open-api.bingx.com";
+
+// ⚡ POOL DE CONEXIONES ULTRA-RÁPIDO PARA SINGAPORE
+const ultraFastAgent = new https.Agent({
+  keepAlive: true,
+  keepAliveMsecs: 1000,
+  maxSockets: 50,
+  maxFreeSockets: 25,
+  timeout: 2000,
+  freeSocketTimeout: 4000
+});
+
+// ⚡ INSTANCIA AXIOS OPTIMIZADA
+const fastAxios = axios.create({
+  httpsAgent: ultraFastAgent,
+  timeout: 3000,
+  headers: {
+    'Connection': 'keep-alive',
+    'Content-Type': 'application/json',
+    'User-Agent': 'TradingBot/1.0'
+  },
+  validateStatus: () => true
+});
 
 console.log('🔑 BingX API Keys configuradas:', {
   apiKey: API_KEY ? `${API_KEY.substring(0, 8)}...` : 'NO CONFIGURADA',
   secret: API_SECRET ? `${API_SECRET.substring(0, 8)}...` : 'NO CONFIGURADA'
 });
 
+// ⚡ NORMALIZACIÓN ULTRA-RÁPIDA
 function normalizeSymbol(symbol) {
   if (!symbol) return symbol;
   console.log(`🔄 Normalizando símbolo: ${symbol}`);
@@ -21,39 +45,54 @@ function normalizeSymbol(symbol) {
   return base;
 }
 
-function getParameters(payload, timestamp, urlEncode = false) {
+// ⚡ PARÁMETROS OPTIMIZADOS (sin encoding innecesario)
+function getParametersFast(payload, timestamp) {
+  const keys = Object.keys(payload).sort();
   let parameters = "";
-  for (const key in payload) {
+  for (const key of keys) {
     if (payload[key] !== undefined && payload[key] !== null) {
-      parameters += urlEncode
-        ? `${key}=${encodeURIComponent(payload[key])}&`
-        : `${key}=${payload[key]}&`;
+      parameters += `${key}=${payload[key]}&`;
     }
   }
   parameters += `timestamp=${timestamp}`;
   return parameters;
 }
 
+// ⚡ PRECIO ULTRA-RÁPIDO (con cache)
+const priceCache = new Map();
 async function getCurrentPrice(symbol) {
+  const cacheKey = symbol;
+  const cached = priceCache.get(cacheKey);
+  
+  // Cache de 5 segundos para velocidad
+  if (cached && (Date.now() - cached.timestamp) < 5000) {
+    return cached.price;
+  }
+
   try {
-    const url = `https://${HOST}/openApi/swap/v2/quote/price?symbol=${symbol}`;
-    const response = await axios.get(url, { timeout: 5000 });
-    if (response.data?.code === 0) {
-      return parseFloat(response.data.data.price);
+    const response = await fastAxios.get(`https://${HOST}/openApi/swap/v2/quote/price?symbol=${symbol}`);
+    const data = typeof response.data === 'string' ? JSON.parse(response.data) : response.data;
+    
+    if (data?.code === 0) {
+      const price = parseFloat(data.data.price);
+      priceCache.set(cacheKey, { price, timestamp: Date.now() });
+      return price;
     }
-    throw new Error(`Respuesta inválida: ${JSON.stringify(response.data)}`);
+    throw new Error(`Respuesta inválida: ${JSON.stringify(data)}`);
   } catch (error) {
     console.error('❌ Error obteniendo precio:', error.message);
     throw error;
   }
 }
 
+// ⚡ CONTRATO INFO OPTIMIZADA
 async function getContractInfo(symbol) {
   try {
-    const url = `https://${HOST}/openApi/swap/v2/quote/contracts`;
-    const response = await axios.get(url, { timeout: 5000 });
-    if (response.data?.code === 0) {
-      const contract = response.data.data.find(c => c.symbol === symbol);
+    const response = await fastAxios.get(`https://${HOST}/openApi/swap/v2/quote/contracts`);
+    const data = typeof response.data === 'string' ? JSON.parse(response.data) : response.data;
+    
+    if (data?.code === 0) {
+      const contract = data.data.find(c => c.symbol === symbol);
       if (contract) {
         return {
           minOrderQty: parseFloat(contract.minOrderQty || '0.001'),
@@ -70,56 +109,59 @@ async function getContractInfo(symbol) {
   return { minOrderQty: 0.001, tickSize: 0.01, stepSize: 0.001, minNotional: 1 };
 }
 
+// ⚡ LEVERAGE ULTRA-RÁPIDO (saltear si no es necesario)
 async function setLeverage(symbol, leverage = 5) {
   if (!API_KEY || !API_SECRET) throw new Error('API key/secret no configurados');
 
   try {
     const timestamp = Date.now();
-    const payload = {
-      symbol,
-      side: "LONG",
-      leverage
-    };
-    const parameters = getParameters(payload, timestamp, false);
-    const parametersUrlEncoded = getParameters(payload, timestamp, true);
+    const payload = { symbol, side: "LONG", leverage };
+    const parameters = getParametersFast(payload, timestamp);
     const signature = crypto.createHmac('sha256', API_SECRET).update(parameters).digest('hex');
-    const url = `https://${HOST}/openApi/swap/v2/trade/leverage?${parametersUrlEncoded}&signature=${signature}`;
-    const response = await axios.post(url, null, {
-      headers: { 'X-BX-APIKEY': API_KEY },
-      timeout: 8000,
-      transformResponse: (resp) => resp // Mantener como string
+    
+    const response = await fastAxios.post(`https://${HOST}/openApi/swap/v2/trade/leverage`, null, {
+      params: { ...payload, timestamp, signature },
+      headers: { 'X-BX-APIKEY': API_KEY }
     });
-    return JSON.parse(response.data);
+    
+    const data = typeof response.data === 'string' ? JSON.parse(response.data) : response.data;
+    return data;
   } catch (error) {
     console.warn('⚠️ Error al establecer leverage:', error.message);
     return null;
   }
 }
 
+// 🚀 FUNCIÓN PRINCIPAL ULTRA-OPTIMIZADA
 async function placeOrderInternal({ symbol, side, leverage = 5, usdtAmount = 1 }) {
+  const startTime = Date.now();
+  
   if (!API_KEY || !API_SECRET) throw new Error('API key/secret no configurados');
 
   try {
-    await setLeverage(symbol, leverage);
-
-    // CÁLCULO CORRECTO: margin × leverage = poder de compra
-    const price = await getCurrentPrice(symbol);
+    // 1. Establecer leverage (en paralelo con precio)
+    const leveragePromise = setLeverage(symbol, leverage);
+    const pricePromise = getCurrentPrice(symbol);
+    
+    // 2. Ejecutar en paralelo para velocidad
+    const [leverageResult, price] = await Promise.all([leveragePromise, pricePromise]);
+    
     console.log(`💰 Precio actual de ${symbol}: ${price} USDT`);
     console.log(`💳 Margin deseado: ${usdtAmount} USDT`);
     console.log(`⚡ Leverage: ${leverage}x`);
     
-    // Poder de compra = margin × leverage
+    // 3. Cálculo optimizado
     const buyingPower = usdtAmount * leverage;
     console.log(`🚀 Poder de compra: ${usdtAmount} USDT × ${leverage}x = ${buyingPower} USDT`);
     
-    // Quantity basada en el poder de compra
     let quantity = buyingPower / price;
-    quantity = Math.round(quantity * 1000) / 1000; // 3 decimales
-    quantity = Math.max(0.001, quantity); // Mínimo técnico
+    quantity = Math.round(quantity * 1000) / 1000;
+    quantity = Math.max(0.001, quantity);
     
     console.log(`🧮 Quantity calculada: ${quantity} (${buyingPower} USDT ÷ ${price})`);
     console.log(`📊 Margin estimado a usar: ~${(quantity * price) / leverage} USDT`);
 
+    // 4. Payload optimizado
     const timestamp = Date.now();
     const orderSide = side.toUpperCase();
     const payload = {
@@ -134,19 +176,26 @@ async function placeOrderInternal({ symbol, side, leverage = 5, usdtAmount = 1 }
 
     console.log('📋 Payload orden:', payload);
 
-    const parameters = getParameters(payload, timestamp, false);
-    const parametersUrlEncoded = getParameters(payload, timestamp, true);
+    // 5. Firma ultra-rápida
+    const parameters = getParametersFast(payload, timestamp);
     const signature = crypto.createHmac('sha256', API_SECRET).update(parameters).digest('hex');
-    const url = `https://${HOST}/openApi/swap/v2/trade/order?${parametersUrlEncoded}&signature=${signature}`;
 
-    const response = await axios.post(url, null, {
-      headers: { 'X-BX-APIKEY': API_KEY },
-      timeout: 10000,
-      transformResponse: (resp) => resp
+    // 6. Request directo
+    const response = await fastAxios.post(`https://${HOST}/openApi/swap/v2/trade/order`, null, {
+      params: { ...payload, timestamp, signature },
+      headers: { 'X-BX-APIKEY': API_KEY }
     });
 
-    return JSON.parse(response.data);
+    const latency = Date.now() - startTime;
+    console.log(`⚡ Orden procesada en ${latency}ms`);
+
+    const data = typeof response.data === 'string' ? JSON.parse(response.data) : response.data;
+    return data;
+
   } catch (error) {
+    const latency = Date.now() - startTime;
+    console.error(`❌ Error en ${latency}ms:`, error.message);
+    
     const data = error.response?.data;
     return {
       success: false,
@@ -156,6 +205,7 @@ async function placeOrderInternal({ symbol, side, leverage = 5, usdtAmount = 1 }
   }
 }
 
+// ⚡ SMART RETRY OPTIMIZADO
 async function placeOrderWithSmartRetry(params) {
   const { symbol, side, leverage = 5 } = params;
   const normalizedSymbol = normalizeSymbol(symbol);
@@ -215,7 +265,7 @@ async function placeOrderWithSmartRetry(params) {
       }
 
       // Agregar un buffer del 10%
-      const finalAmount = Math.ceil(minimumRequired * 1.1 * 100) / 100; // Redondear hacia arriba
+      const finalAmount = Math.ceil(minimumRequired * 1.1 * 100) / 100;
       console.log(`🔄 Reintentando con ${finalAmount} USDT (mínimo + 10% buffer)`);
       
       const retryResult = await placeOrderInternal({
@@ -242,11 +292,12 @@ async function placeOrderWithSmartRetry(params) {
   }
 }
 
+// Función principal
 async function placeOrder(params) {
   return await placeOrderWithSmartRetry(params);
 }
 
-// 💵 Balance function CORREGIDA
+// ⚡ BALANCE ULTRA-RÁPIDO
 async function getUSDTBalance() {
   if (!API_KEY || !API_SECRET) throw new Error('API key/secret no configurados');
 
@@ -254,24 +305,19 @@ async function getUSDTBalance() {
     const timestamp = Date.now();
     const parameters = `timestamp=${timestamp}`;
     const signature = crypto.createHmac('sha256', API_SECRET).update(parameters).digest('hex');
-    const url = `https://${HOST}/openApi/swap/v2/user/balance?${parameters}&signature=${signature}`;
     
-    const response = await axios.get(url, {
-      headers: { 'X-BX-APIKEY': API_KEY },
-      timeout: 8000,
-      transformResponse: (resp) => resp // ← CLAVE: Mantener como string
+    const response = await fastAxios.get(`https://${HOST}/openApi/swap/v2/user/balance`, {
+      params: { timestamp, signature },
+      headers: { 'X-BX-APIKEY': API_KEY }
     });
 
     console.log('🔍 Balance response type:', typeof response.data);
-    console.log('🔍 Balance response:', response.data);
 
-    // Parsear solo si es string
     const data = typeof response.data === 'string' ? JSON.parse(response.data) : response.data;
     
     if (data.code === 0) {
       // Manejar diferentes formatos de respuesta
       if (data.data && data.data.balance) {
-        // Formato: { data: { balance: { balance: "123.45" } } }
         if (typeof data.data.balance === 'object' && data.data.balance.balance) {
           return parseFloat(data.data.balance.balance);
         }
@@ -287,34 +333,37 @@ async function getUSDTBalance() {
     throw new Error(`Formato de respuesta inesperado: ${JSON.stringify(data)}`);
   } catch (error) {
     console.error('❌ Error obteniendo balance:', error.message);
-    console.error('🔍 Error details:', error);
     throw error;
   }
 }
 
+// ⚡ CLOSE POSITION ULTRA-RÁPIDO
 async function closePosition(symbol, side = 'BOTH') {
+  const startTime = Date.now();
+  
   if (!API_KEY || !API_SECRET) throw new Error('API key/secret no configurados');
 
   try {
     const timestamp = Date.now();
     const normalizedSymbol = normalizeSymbol(symbol);
-    const payload = {
-      symbol: normalizedSymbol,
-      side: side,
-      type: 'MARKET'
-    };
-    const parameters = getParameters(payload, timestamp, false);
-    const parametersUrlEncoded = getParameters(payload, timestamp, true);
+    const payload = { symbol: normalizedSymbol, side: side, type: 'MARKET' };
+    const parameters = getParametersFast(payload, timestamp);
     const signature = crypto.createHmac('sha256', API_SECRET).update(parameters).digest('hex');
-    const url = `https://${HOST}/openApi/swap/v2/trade/closeAllPositions?${parametersUrlEncoded}&signature=${signature}`;
 
-    const response = await axios.post(url, null, {
-      headers: { 'X-BX-APIKEY': API_KEY },
-      timeout: 10000,
-      transformResponse: (resp) => resp // Mantener como string
+    const response = await fastAxios.post(`https://${HOST}/openApi/swap/v2/trade/closeAllPositions`, null, {
+      params: { ...payload, timestamp, signature },
+      headers: { 'X-BX-APIKEY': API_KEY }
     });
-    return JSON.parse(response.data);
+
+    const latency = Date.now() - startTime;
+    console.log(`⚡ Close procesado en ${latency}ms`);
+
+    const data = typeof response.data === 'string' ? JSON.parse(response.data) : response.data;
+    return data;
   } catch (error) {
+    const latency = Date.now() - startTime;
+    console.error(`❌ Error close en ${latency}ms:`, error.message);
+    
     const data = error.response?.data;
     return {
       success: false,
