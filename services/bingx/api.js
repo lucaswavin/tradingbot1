@@ -77,25 +77,96 @@ async function getCurrentPrice(symbol) {
   }
 }
 
-// Calcula quantity basado en USDT a invertir
-async function calculateQuantity(symbol, usdtAmount = 5) {
-  console.log(`🧮 Calculando quantity para ${symbol} con ${usdtAmount} USDT`);
+// Función para obtener información del contrato y mínimos
+async function getContractInfo(symbol) {
+  console.log(`📋 Obteniendo info del contrato para: ${symbol}`);
   
   try {
-    const price = await getCurrentPrice(symbol);
+    const response = await axios.get(`https://${HOST}/openApi/swap/v2/quote/contracts`, { timeout: 5000 });
+    
+    if (response.data && response.data.code === 0) {
+      const contracts = response.data.data;
+      const contract = contracts.find(c => c.symbol === symbol);
+      
+      if (contract) {
+        const info = {
+          minOrderQty: parseFloat(contract.minOrderQty || '0.001'),
+          tickSize: parseFloat(contract.tickSize || '0.01'),
+          stepSize: parseFloat(contract.stepSize || '0.001'),
+          minNotional: parseFloat(contract.minNotional || '1'), // Mínimo en USDT
+          symbol: contract.symbol
+        };
+        
+        console.log(`✅ Info del contrato:`, info);
+        return info;
+      }
+    }
+    
+    console.log('⚠️ Contrato no encontrado, usando valores por defecto');
+    return {
+      minOrderQty: 0.001,
+      tickSize: 0.01,
+      stepSize: 0.001,
+      minNotional: 1 // Mínimo 1 USDT
+    };
+    
+  } catch (error) {
+    console.error('❌ Error obteniendo info del contrato:', error.message);
+    console.log('🔄 Usando valores por defecto');
+    return {
+      minOrderQty: 0.001,
+      tickSize: 0.01,
+      stepSize: 0.001,
+      minNotional: 1 // Mínimo 1 USDT
+    };
+  }
+}
+
+// Calcula quantity basado en USDT a invertir O MÍNIMO REQUERIDO
+async function calculateQuantity(symbol, desiredUsdtAmount = 1, leverage = 5) {
+  console.log(`🧮 Calculando quantity para ${symbol}`);
+  console.log(`💰 USDT deseados: ${desiredUsdtAmount} USDT`);
+  console.log(`⚡ Leverage: ${leverage}x`);
+  
+  try {
+    // Obtener precio actual e info del contrato
+    const [price, contractInfo] = await Promise.all([
+      getCurrentPrice(symbol),
+      getContractInfo(symbol)
+    ]);
+    
+    console.log(`💵 Precio actual: ${price} USDT`);
+    console.log(`📏 Mínimo notional: ${contractInfo.minNotional} USDT`);
+    console.log(`📏 Quantity mínima: ${contractInfo.minOrderQty}`);
+    
+    // Usar el mayor entre lo deseado y el mínimo requerido
+    const usdtAmount = Math.max(desiredUsdtAmount, contractInfo.minNotional);
+    console.log(`✅ USDT a usar: ${usdtAmount} USDT (${usdtAmount === desiredUsdtAmount ? 'deseado' : 'mínimo requerido'})`);
+    
+    // Calcular quantity
     let quantity = usdtAmount / price;
     
-    console.log(`📐 Quantity inicial calculada: ${quantity}`);
+    console.log(`📐 Quantity inicial: ${quantity}`);
     
-    // Redondear a 3 decimales
-    quantity = Math.round(quantity * 1000) / 1000;
-    quantity = Math.max(0.001, quantity);
+    // Ajustar al stepSize del contrato
+    quantity = Math.max(
+      contractInfo.minOrderQty,
+      Math.floor(quantity / contractInfo.stepSize) * contractInfo.stepSize
+    );
     
-    console.log(`💡 Quantity final: ${quantity} contratos`);
+    // Redondear a la precisión correcta
+    const decimals = contractInfo.stepSize.toString().split('.')[1]?.length || 3;
+    quantity = parseFloat(quantity.toFixed(decimals));
+    
+    console.log(`✅ Quantity final: ${quantity} contratos`);
+    console.log(`💰 Margin estimado: ~${quantity * price} USDT`);
+    console.log(`📊 Exposición con ${leverage}x: ~${quantity * price * leverage} USDT`);
+    
     return quantity;
+    
   } catch (error) {
     console.error('❌ Error calculando quantity:', error.message);
-    console.log('🔄 Usando quantity por defecto: 0.001');
+    console.log('🔄 Usando quantity mínima por defecto: 0.001');
     return 0.001;
   }
 }
@@ -157,7 +228,7 @@ async function setLeverage(symbol, leverage = 5) {
 }
 
 // Función principal para colocar orden - FORMATO OFICIAL BINGX
-async function placeOrder({ symbol, side, leverage = 5, usdtAmount = 5 }) {
+async function placeOrder({ symbol, side, leverage = 5, usdtAmount = 1 }) {
   console.log('\n🚀 ===== INICIANDO ORDEN =====');
   console.log(`📊 Parámetros recibidos:`, { symbol, side, leverage, usdtAmount });
   
@@ -173,9 +244,9 @@ async function placeOrder({ symbol, side, leverage = 5, usdtAmount = 5 }) {
     console.log('\n--- PASO 1: Establecer Leverage ---');
     await setLeverage(normalizedSymbol, leverage);
 
-    // 2. Calcular quantity
+    // 2. Calcular quantity CON LEVERAGE CORRECTO
     console.log('\n--- PASO 2: Calcular Quantity ---');
-    const quantity = await calculateQuantity(normalizedSymbol, usdtAmount);
+    const quantity = await calculateQuantity(normalizedSymbol, usdtAmount, leverage);
 
     // 3. Preparar payload EXACTO según código oficial BingX
     console.log('\n--- PASO 3: Preparar Payload Oficial ---');
@@ -344,10 +415,114 @@ async function getUSDTBalance() {
   }
 }
 
+// Función para cerrar una posición específica
+async function closePosition(symbol, side = 'BOTH') {
+  console.log(`🔒 Cerrando posición: ${symbol} (${side})`);
+  
+  if (!API_KEY || !API_SECRET) {
+    throw new Error('BingX API keys no configuradas');
+  }
+
+  try {
+    const timestamp = new Date().getTime();
+    const normalizedSymbol = normalizeSymbol(symbol);
+    
+    // Payload para cerrar posición
+    const payload = {
+      symbol: normalizedSymbol,
+      side: side === 'BOTH' ? 'BOTH' : side,
+      type: 'MARKET'
+    };
+
+    console.log('📋 Payload close position:', payload);
+
+    // Construir parámetros usando función oficial
+    const parameters = getParameters(payload, timestamp, false);
+    const parametersUrlEncoded = getParameters(payload, timestamp, true);
+    
+    console.log('🔐 Parámetros close para firma:', parameters);
+    
+    // Crear firma
+    const signature = crypto.createHmac('sha256', API_SECRET).update(parameters).digest('hex');
+    console.log('🔐 Firma close generada:', signature.substring(0, 16) + '...');
+    
+    // URL para cerrar posición
+    const url = `https://${HOST}/openApi/swap/v2/trade/closeAllPositions?${parametersUrlEncoded}&signature=${signature}`;
+    console.log('🌐 URL close position:', url);
+
+    const config = {
+      method: 'POST',
+      url: url,
+      headers: {
+        'X-BX-APIKEY': API_KEY
+      },
+      timeout: 10000,
+      transformResponse: (resp) => {
+        console.log('📄 Respuesta close raw:', resp);
+        return resp;
+      }
+    };
+
+    const response = await axios(config);
+
+    console.log('✅ Close Position - Status:', response.status);
+    console.log('🔒 Close Position - Data:', response.data);
+    
+    const responseData = JSON.parse(response.data);
+    console.log('🔒 Posición cerrada:', JSON.stringify(responseData, null, 2));
+    
+    return responseData;
+
+  } catch (error) {
+    console.error('❌ Error cerrando posición:', error.message);
+    if (error.response) {
+      console.error('📄 Error data:', error.response.data);
+      try {
+        const errorData = typeof error.response.data === 'string' ? 
+          JSON.parse(error.response.data) : error.response.data;
+        return {
+          success: false,
+          error: errorData,
+          code: error.response.status,
+          message: errorData?.msg || 'Error cerrando posición'
+        };
+      } catch (parseError) {
+        return {
+          success: false,
+          error: error.response.data,
+          code: error.response.status,
+          message: 'Error parseando respuesta de cierre'
+        };
+      }
+    }
+    throw error;
+  }
+}
+
+// Función para cerrar todas las posiciones de un símbolo
+async function closeAllPositions(symbol) {
+  console.log(`🔒 Cerrando TODAS las posiciones de: ${symbol}`);
+  
+  try {
+    // Intentar cerrar ambas posiciones (LONG y SHORT)
+    const result = await closePosition(symbol, 'BOTH');
+    
+    console.log('✅ Todas las posiciones cerradas para:', symbol);
+    return result;
+    
+  } catch (error) {
+    console.error('❌ Error cerrando todas las posiciones:', error.message);
+    throw error;
+  }
+}
+
 module.exports = {
   getUSDTBalance,
   placeOrder,
   normalizeSymbol,
   setLeverage,
-  getCurrentPrice
+  getCurrentPrice,
+  closePosition,
+  closeAllPositions,
+  getContractInfo
 };
