@@ -102,6 +102,16 @@ async function placeOrderInternal({ symbol, side, leverage = 5, usdtAmount = 1 }
   try {
     await setLeverage(symbol, leverage);
 
+    // Calcular quantity basado en el precio actual
+    const price = await getCurrentPrice(symbol);
+    console.log(`💰 Precio actual de ${symbol}: ${price} USDT`);
+    
+    let quantity = usdtAmount / price;
+    quantity = Math.round(quantity * 1000) / 1000; // 3 decimales
+    quantity = Math.max(0.001, quantity); // Mínimo técnico
+    
+    console.log(`🧮 Quantity calculada: ${quantity} (${usdtAmount} USDT ÷ ${price})`);
+
     const timestamp = Date.now();
     const orderSide = side.toUpperCase();
     const payload = {
@@ -109,10 +119,12 @@ async function placeOrderInternal({ symbol, side, leverage = 5, usdtAmount = 1 }
       side: orderSide,
       positionSide: orderSide === 'BUY' ? 'LONG' : 'SHORT',
       type: 'MARKET',
-      quoteOrderQty: usdtAmount.toString(),
+      quantity: quantity.toString(), // ← Usar quantity, no quoteOrderQty
       workingType: 'CONTRACT_PRICE',
       priceProtect: 'false'
     };
+
+    console.log('📋 Payload orden:', payload);
 
     const parameters = getParameters(payload, timestamp, false);
     const parametersUrlEncoded = getParameters(payload, timestamp, true);
