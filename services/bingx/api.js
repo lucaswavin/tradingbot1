@@ -26,6 +26,33 @@ function normalizeSymbol(symbol) {
   return base;
 }
 
+// Función oficial de BingX para construir parámetros
+function getParameters(payload, timestamp, urlEncode = false) {
+  let parameters = "";
+  
+  console.log('📋 Payload original:', payload);
+  
+  for (const key in payload) {
+    if (payload[key] !== undefined && payload[key] !== null) {
+      if (urlEncode) {
+        parameters += key + "=" + encodeURIComponent(payload[key]) + "&";
+      } else {
+        parameters += key + "=" + payload[key] + "&";
+      }
+    }
+  }
+  
+  if (parameters) {
+    parameters = parameters.substring(0, parameters.length - 1);
+    parameters = parameters + "&timestamp=" + timestamp;
+  } else {
+    parameters = "timestamp=" + timestamp;
+  }
+  
+  console.log('🔗 Parámetros construidos:', parameters);
+  return parameters;
+}
+
 // Función para obtener el precio actual
 async function getCurrentPrice(symbol) {
   console.log(`💰 Obteniendo precio actual para: ${symbol}`);
@@ -34,8 +61,8 @@ async function getCurrentPrice(symbol) {
     const url = `https://${HOST}/openApi/swap/v2/quote/price?symbol=${symbol}`;
     console.log(`🌐 URL precio: ${url}`);
     
-    const response = await axios.get(url);
-    console.log('📊 Respuesta precio completa:', JSON.stringify(response.data, null, 2));
+    const response = await axios.get(url, { timeout: 5000 });
+    console.log('📊 Respuesta precio:', JSON.stringify(response.data, null, 2));
     
     if (response.data && response.data.code === 0) {
       const price = parseFloat(response.data.data.price);
@@ -43,12 +70,9 @@ async function getCurrentPrice(symbol) {
       return price;
     }
     
-    throw new Error(`Error en respuesta: ${JSON.stringify(response.data)}`);
+    throw new Error(`Error en respuesta precio: ${JSON.stringify(response.data)}`);
   } catch (error) {
     console.error('❌ Error obteniendo precio:', error.message);
-    if (error.response) {
-      console.error('📄 Datos de error:', error.response.data);
-    }
     throw error;
   }
 }
@@ -59,19 +83,15 @@ async function calculateQuantity(symbol, usdtAmount = 5) {
   
   try {
     const price = await getCurrentPrice(symbol);
-    
-    // Para contratos perpetuos, quantity es el número de contratos
     let quantity = usdtAmount / price;
     
     console.log(`📐 Quantity inicial calculada: ${quantity}`);
     
     // Redondear a 3 decimales
     quantity = Math.round(quantity * 1000) / 1000;
-    
-    // Mínimo 0.001 para la mayoría de pares
     quantity = Math.max(0.001, quantity);
     
-    console.log(`💡 Quantity final: ${quantity} contratos (precio: ${price} USDT)`);
+    console.log(`💡 Quantity final: ${quantity} contratos`);
     return quantity;
   } catch (error) {
     console.error('❌ Error calculando quantity:', error.message);
@@ -80,7 +100,7 @@ async function calculateQuantity(symbol, usdtAmount = 5) {
   }
 }
 
-// Establecer leverage
+// Establecer leverage según formato oficial
 async function setLeverage(symbol, leverage = 5) {
   console.log(`🔧 Estableciendo leverage ${leverage}x para ${symbol}`);
   
@@ -88,50 +108,55 @@ async function setLeverage(symbol, leverage = 5) {
     throw new Error('BingX API keys no configuradas');
   }
 
-  const timestamp = Date.now();
-  const params = {
-    leverage: leverage,
-    symbol: symbol,
-    timestamp: timestamp
-  };
-
-  console.log('📋 Parámetros leverage:', params);
-
-  // Crear query string ordenado
-  const sortedKeys = Object.keys(params).sort();
-  const queryString = sortedKeys.map(key => `${key}=${params[key]}`).join('&');
-  const signature = crypto.createHmac('sha256', API_SECRET).update(queryString).digest('hex');
-  
-  console.log('🔐 Query string leverage:', queryString);
-  console.log('🔐 Firma generada para leverage:', signature.substring(0, 16) + '...');
-  
-  const url = `https://${HOST}/openApi/swap/v2/trade/leverage`;
-  const finalParams = { ...params, signature };
-  
-  console.log('🌐 URL leverage:', url);
-  console.log('📤 Parámetros finales leverage:', finalParams);
-
   try {
+    const timestamp = new Date().getTime();
+    
+    // Payload según documentación oficial BingX
+    const payload = {
+      symbol: symbol,
+      side: "LONG", // Requerido para leverage
+      leverage: leverage
+    };
+
+    console.log('📋 Payload leverage:', payload);
+
+    // Construir parámetros usando función oficial
+    const parameters = getParameters(payload, timestamp, false);
+    const parametersUrlEncoded = getParameters(payload, timestamp, true);
+    
+    console.log('🔐 Parámetros para firma:', parameters);
+    console.log('🔗 Parámetros URL encoded:', parametersUrlEncoded);
+    
+    // Crear firma usando método oficial
+    const signature = crypto.createHmac('sha256', API_SECRET).update(parameters).digest('hex');
+    console.log('🔐 Firma generada:', signature.substring(0, 16) + '...');
+    
+    // URL final según formato oficial
+    const url = `https://${HOST}/openApi/swap/v2/trade/leverage?${parametersUrlEncoded}&signature=${signature}`;
+    console.log('🌐 URL leverage completa:', url);
+
     const response = await axios.post(url, null, {
-      params: finalParams,
       headers: {
-        'X-BX-APIKEY': API_KEY,
-        'Content-Type': 'application/json'
+        'X-BX-APIKEY': API_KEY
+      },
+      timeout: 8000,
+      transformResponse: (resp) => {
+        console.log('📄 Respuesta leverage raw:', resp);
+        return resp;
       }
     });
 
-    console.log('✅ Leverage establecido exitosamente:', JSON.stringify(response.data, null, 2));
-    return response.data;
+    console.log('✅ Leverage - Status:', response.status);
+    console.log('✅ Leverage - Data:', response.data);
+    
+    return JSON.parse(response.data);
   } catch (error) {
-    console.warn('⚠️ Advertencia estableciendo leverage:', error.response?.data?.msg || error.message);
-    if (error.response) {
-      console.warn('📄 Datos del error leverage:', JSON.stringify(error.response.data, null, 2));
-    }
-    return null;
+    console.warn('⚠️ Error leverage (continuando):', error.response?.data || error.message);
+    return null; // No fallar por leverage
   }
 }
 
-// Función principal para colocar orden - CORREGIDA
+// Función principal para colocar orden - FORMATO OFICIAL BINGX
 async function placeOrder({ symbol, side, leverage = 5, usdtAmount = 5 }) {
   console.log('\n🚀 ===== INICIANDO ORDEN =====');
   console.log(`📊 Parámetros recibidos:`, { symbol, side, leverage, usdtAmount });
@@ -144,7 +169,7 @@ async function placeOrder({ symbol, side, leverage = 5, usdtAmount = 5 }) {
   console.log(`🎯 Procesando orden: ${side.toUpperCase()} ${normalizedSymbol}`);
 
   try {
-    // 1. Establecer leverage
+    // 1. Establecer leverage (opcional)
     console.log('\n--- PASO 1: Establecer Leverage ---');
     await setLeverage(normalizedSymbol, leverage);
 
@@ -152,62 +177,67 @@ async function placeOrder({ symbol, side, leverage = 5, usdtAmount = 5 }) {
     console.log('\n--- PASO 2: Calcular Quantity ---');
     const quantity = await calculateQuantity(normalizedSymbol, usdtAmount);
 
-    // 3. Preparar parámetros CORRECTOS según BingX API
-    console.log('\n--- PASO 3: Preparar Orden ---');
-    const timestamp = Date.now();
+    // 3. Preparar payload EXACTO según código oficial BingX
+    console.log('\n--- PASO 3: Preparar Payload Oficial ---');
+    const timestamp = new Date().getTime();
     const orderSide = side.toUpperCase();
     
-    // PARÁMETROS CORRECTOS para BingX
-    const orderParams = {
-      positionSide: orderSide === 'BUY' ? 'LONG' : 'SHORT',
-      quantity: quantity.toString(), // Convertir a string
-      side: orderSide,
+    // PAYLOAD EXACTO según ejemplo oficial de BingX
+    const payload = {
       symbol: normalizedSymbol,
-      timestamp: timestamp,
-      type: 'MARKET'
+      side: orderSide,
+      positionSide: orderSide === 'BUY' ? 'LONG' : 'SHORT',
+      type: 'MARKET',
+      quantity: quantity
     };
 
-    console.log('📋 Parámetros de orden preparados:', orderParams);
+    console.log('📋 Payload oficial BingX:', payload);
 
-    // 4. Crear query string ORDENADO ALFABÉTICAMENTE
-    console.log('\n--- PASO 4: Crear Firma ---');
-    const sortedKeys = Object.keys(orderParams).sort();
-    console.log('📝 Claves ordenadas:', sortedKeys);
+    // 4. Construir parámetros usando función oficial
+    console.log('\n--- PASO 4: Construir Parámetros Oficiales ---');
+    const parameters = getParameters(payload, timestamp, false); // Para firma
+    const parametersUrlEncoded = getParameters(payload, timestamp, true); // Para URL
     
-    const queryString = sortedKeys.map(key => `${key}=${orderParams[key]}`).join('&');
-    console.log('🔐 Query string ordenado:', queryString);
+    console.log('🔐 Parámetros para firma:', parameters);
+    console.log('🔗 Parámetros URL encoded:', parametersUrlEncoded);
     
-    const signature = crypto.createHmac('sha256', API_SECRET).update(queryString).digest('hex');
+    // 5. Crear firma usando método oficial
+    const signature = crypto.createHmac('sha256', API_SECRET).update(parameters).digest('hex');
     console.log('🔐 Firma generada:', signature.substring(0, 16) + '...');
 
-    // 5. Ejecutar orden con FORMATO CORRECTO
-    console.log('\n--- PASO 5: Ejecutar Orden ---');
-    const url = `https://${HOST}/openApi/swap/v2/trade/order`;
+    // 6. Ejecutar orden con formato OFICIAL
+    console.log('\n--- PASO 5: Ejecutar Orden Oficial ---');
     
-    // Parámetros finales con firma
-    const finalParams = {
-      ...orderParams,
-      signature: signature
+    const url = `https://${HOST}/openApi/swap/v2/trade/order?${parametersUrlEncoded}&signature=${signature}`;
+    console.log('🌐 URL orden completa:', url);
+
+    const config = {
+      method: 'POST',
+      url: url,
+      headers: {
+        'X-BX-APIKEY': API_KEY
+      },
+      timeout: 10000,
+      transformResponse: (resp) => {
+        console.log('📄 Respuesta orden raw:', resp);
+        return resp;
+      }
     };
 
-    console.log('🌐 URL orden:', url);
-    console.log('📤 Parámetros finales de orden:', finalParams);
+    console.log('⚙️ Config de request:', JSON.stringify(config, null, 2));
 
-    // ENVIAR COMO FORM DATA, NO QUERY STRING
-    const response = await axios.post(url, null, {
-      params: finalParams, // BingX espera los parámetros como query params
-      headers: {
-        'X-BX-APIKEY': API_KEY,
-        'Content-Type': 'application/json'
-      }
-    });
+    const response = await axios(config);
 
     console.log('\n✅ ===== ORDEN EJECUTADA =====');
     console.log('📈 Status HTTP:', response.status);
-    console.log('🎉 Respuesta BingX:', JSON.stringify(response.data, null, 2));
+    console.log('🎉 Respuesta BingX raw:', response.data);
+    
+    // Parsear respuesta JSON
+    const responseData = JSON.parse(response.data);
+    console.log('🎉 Respuesta BingX parseada:', JSON.stringify(responseData, null, 2));
     console.log('===========================\n');
     
-    return response.data;
+    return responseData;
 
   } catch (error) {
     console.log('\n❌ ===== ERROR EN ORDEN =====');
@@ -215,20 +245,29 @@ async function placeOrder({ symbol, side, leverage = 5, usdtAmount = 5 }) {
     
     if (error.response) {
       console.error('📊 Status HTTP:', error.response.status);
-      console.error('🔍 Headers respuesta:', error.response.headers);
-      console.error('📄 Datos del error COMPLETOS:', JSON.stringify(error.response.data, null, 2));
+      console.error('📄 Headers:', error.response.headers);
+      console.error('📄 Data raw:', error.response.data);
       
-      // Log adicional para debug
-      if (error.response.data && error.response.data.msg) {
-        console.error('📝 Mensaje específico del error:', error.response.data.msg);
+      try {
+        const errorData = typeof error.response.data === 'string' ? 
+          JSON.parse(error.response.data) : error.response.data;
+        console.error('📄 Error parseado:', JSON.stringify(errorData, null, 2));
+        
+        return {
+          success: false,
+          error: errorData,
+          code: error.response.status,
+          message: errorData?.msg || 'Error desconocido'
+        };
+      } catch (parseError) {
+        console.error('❌ Error parseando respuesta:', parseError.message);
+        return {
+          success: false,
+          error: error.response.data,
+          code: error.response.status,
+          message: 'Error parseando respuesta'
+        };
       }
-      
-      return {
-        success: false,
-        error: error.response.data,
-        code: error.response.status,
-        message: error.response.data?.msg || 'Error desconocido'
-      };
     } else {
       console.error('🌐 Error de red:', error.message);
       console.log('============================\n');
@@ -245,74 +284,62 @@ async function getUSDTBalance() {
     throw new Error('BingX API keys no configuradas');
   }
 
-  const timestamp = Date.now();
-  const params = { timestamp };
-  
-  console.log('📋 Parámetros balance:', params);
-  
-  const queryString = `timestamp=${timestamp}`;
-  const signature = crypto.createHmac('sha256', API_SECRET).update(queryString).digest('hex');
-  
-  console.log('🔐 Firma balance:', signature.substring(0, 16) + '...');
-  
-  const url = `https://${HOST}/openApi/swap/v2/user/balance?${queryString}&signature=${signature}`;
-  console.log('🌐 URL balance:', url);
-
   try {
+    const timestamp = new Date().getTime();
+    console.log('⏰ Timestamp generado:', timestamp);
+    
+    // Usar función oficial para construir parámetros
+    const parameters = `timestamp=${timestamp}`;
+    const signature = crypto.createHmac('sha256', API_SECRET).update(parameters).digest('hex');
+    
+    console.log('🔐 Obteniendo balance...');
+    
+    const url = `https://${HOST}/openApi/swap/v2/user/balance?${parameters}&signature=${signature}`;
+
     const response = await axios.get(url, {
+      timeout: 8000,
       headers: {
-        'X-BX-APIKEY': API_KEY,
-        'Content-Type': 'application/json'
+        'X-BX-APIKEY': API_KEY
+      },
+      transformResponse: (resp) => {
+        return resp; // Mantener como string para manejar big ints
       }
     });
 
-    console.log('✅ Respuesta balance completa:', JSON.stringify(response.data, null, 2));
+    console.log('✅ Balance obtenido - Status:', response.status);
+    console.log('📄 Balance raw:', response.data);
+    
+    const balanceData = JSON.parse(response.data);
+    console.log('📊 Balance parseado:', JSON.stringify(balanceData, null, 2));
 
-    if (response.data && response.data.code === 0) {
-      const data = response.data.data;
-      
-      console.log('🔍 Analizando estructura del balance...');
+    if (balanceData && balanceData.code === 0) {
+      const data = balanceData.data;
       
       if (data && data.balance) {
-        console.log('📊 Formato detectado: objeto con balance');
         if (typeof data.balance === 'object' && data.balance.balance) {
           const balance = parseFloat(data.balance.balance);
-          console.log(`💵 Balance extraído (objeto): ${balance} USDT`);
-          return balance;
-        }
-        if (typeof data.balance === 'string') {
-          const balance = parseFloat(data.balance);
-          console.log(`💵 Balance extraído (string): ${balance} USDT`);
+          console.log(`💵 Balance final: ${balance} USDT`);
           return balance;
         }
       }
       
       if (Array.isArray(data)) {
-        console.log('📊 Formato detectado: array de balances');
         const usdt = data.find(item => item.asset === 'USDT');
         if (usdt) {
           const balance = parseFloat(usdt.balance || 0);
-          console.log(`💵 Balance USDT encontrado: ${balance} USDT`);
+          console.log(`💵 Balance USDT: ${balance} USDT`);
           return balance;
         }
       }
-      
-      if (typeof data === 'number') {
-        console.log(`💵 Balance directo: ${data} USDT`);
-        return data;
-      }
     }
 
-    throw new Error(`Formato de respuesta inesperado: ${JSON.stringify(response.data)}`);
+    throw new Error(`Formato de respuesta inesperado: ${JSON.stringify(balanceData)}`);
     
   } catch (error) {
-    console.log('\n❌ ===== ERROR BALANCE =====');
-    console.error('💥 Error obteniendo balance:', error.message);
+    console.error('❌ Error obteniendo balance:', error.message);
     if (error.response) {
-      console.error('📊 Status:', error.response.status);
-      console.error('📄 Data:', JSON.stringify(error.response.data, null, 2));
+      console.error('📄 Data:', error.response.data);
     }
-    console.log('==========================\n');
     throw error;
   }
 }
