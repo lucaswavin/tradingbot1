@@ -102,15 +102,23 @@ async function placeOrderInternal({ symbol, side, leverage = 5, usdtAmount = 1 }
   try {
     await setLeverage(symbol, leverage);
 
-    // Calcular quantity basado en el precio actual
+    // CÁLCULO CORRECTO: margin × leverage = poder de compra
     const price = await getCurrentPrice(symbol);
     console.log(`💰 Precio actual de ${symbol}: ${price} USDT`);
+    console.log(`💳 Margin deseado: ${usdtAmount} USDT`);
+    console.log(`⚡ Leverage: ${leverage}x`);
     
-    let quantity = usdtAmount / price;
+    // Poder de compra = margin × leverage
+    const buyingPower = usdtAmount * leverage;
+    console.log(`🚀 Poder de compra: ${usdtAmount} USDT × ${leverage}x = ${buyingPower} USDT`);
+    
+    // Quantity basada en el poder de compra
+    let quantity = buyingPower / price;
     quantity = Math.round(quantity * 1000) / 1000; // 3 decimales
     quantity = Math.max(0.001, quantity); // Mínimo técnico
     
-    console.log(`🧮 Quantity calculada: ${quantity} (${usdtAmount} USDT ÷ ${price})`);
+    console.log(`🧮 Quantity calculada: ${quantity} (${buyingPower} USDT ÷ ${price})`);
+    console.log(`📊 Margin estimado a usar: ~${(quantity * price) / leverage} USDT`);
 
     const timestamp = Date.now();
     const orderSide = side.toUpperCase();
@@ -119,7 +127,7 @@ async function placeOrderInternal({ symbol, side, leverage = 5, usdtAmount = 1 }
       side: orderSide,
       positionSide: orderSide === 'BUY' ? 'LONG' : 'SHORT',
       type: 'MARKET',
-      quantity: quantity.toString(), // ← Usar quantity, no quoteOrderQty
+      quantity: quantity.toString(),
       workingType: 'CONTRACT_PRICE',
       priceProtect: 'false'
     };
@@ -134,7 +142,7 @@ async function placeOrderInternal({ symbol, side, leverage = 5, usdtAmount = 1 }
     const response = await axios.post(url, null, {
       headers: { 'X-BX-APIKEY': API_KEY },
       timeout: 10000,
-      transformResponse: (resp) => resp // Mantener como string
+      transformResponse: (resp) => resp
     });
 
     return JSON.parse(response.data);
@@ -156,30 +164,81 @@ async function placeOrderWithSmartRetry(params) {
 
   try {
     // Primer intento con 1 USDT
-    return await placeOrderInternal({
+    const result = await placeOrderInternal({
       symbol: normalizedSymbol,
       side,
       leverage,
       usdtAmount: 1
     });
+
+    // Si es exitoso, retornar
+    if (result && result.code === 0) {
+      console.log(`✅ ÉXITO con 1 USDT`);
+      return result;
+    }
+
+    // Verificar si es error de mínimo y necesita retry
+    const errorMsg = result?.msg || result?.message || JSON.stringify(result);
+    console.log(`🔍 Analizando error: "${errorMsg}"`);
+    
+    const needsRetry = errorMsg.includes('minimum') || 
+                       errorMsg.includes('less than') || 
+                       errorMsg.includes('min ') ||
+                       errorMsg.toLowerCase().includes('min notional') ||
+                       errorMsg.includes('insufficient');
+
+    if (needsRetry) {
+      console.warn(`⚠️ Orden con 1 USDT falló (mínimo insuficiente), calculando mínimo real...`);
+      
+      // Extraer el mínimo del mensaje de error
+      let minimumRequired = null;
+      
+      // Buscar patrón: "30.2 FHE" o "X.X SYMBOL"
+      const match = errorMsg.match(/([\d.]+)\s+([A-Z]+)/);
+      if (match) {
+        const minQuantity = parseFloat(match[1]);
+        const assetSymbol = match[2];
+        console.log(`📏 Mínimo extraído: ${minQuantity} ${assetSymbol}`);
+        
+        // Calcular el USDT equivalente
+        const price = await getCurrentPrice(normalizedSymbol);
+        minimumRequired = minQuantity * price;
+        console.log(`💰 Mínimo en USDT: ${minimumRequired} USDT (${minQuantity} × ${price})`);
+      }
+      
+      // Si no pudo extraer, usar mínimo del contrato
+      if (!minimumRequired) {
+        console.log(`⚠️ No pudo extraer mínimo del error, consultando contrato...`);
+        const contractInfo = await getContractInfo(normalizedSymbol);
+        minimumRequired = contractInfo.minNotional || 10;
+        console.log(`📋 Usando mínimo del contrato: ${minimumRequired} USDT`);
+      }
+
+      // Agregar un buffer del 10%
+      const finalAmount = Math.ceil(minimumRequired * 1.1 * 100) / 100; // Redondear hacia arriba
+      console.log(`🔄 Reintentando con ${finalAmount} USDT (mínimo + 10% buffer)`);
+      
+      const retryResult = await placeOrderInternal({
+        symbol: normalizedSymbol,
+        side,
+        leverage,
+        usdtAmount: finalAmount
+      });
+      
+      if (retryResult && retryResult.code === 0) {
+        console.log(`✅ ÉXITO con ${finalAmount} USDT (mínimo de BingX)`);
+      }
+      
+      return retryResult;
+    }
+    
+    // Si no necesita retry, retornar el error original
+    console.log(`❌ Error no relacionado con mínimos, no reintentando`);
+    return result;
+    
   } catch (error) {
-    const errorMsg = error?.message || JSON.stringify(error);
-    const needsRetry = errorMsg.includes('less than') || errorMsg.toLowerCase().includes('min notional');
-
-    if (!needsRetry) throw error;
-
-    // Segundo intento: obtener mínimo real
-    console.warn(`⚠️ Orden con 1 USDT falló, reintentando con mínimo real de BingX...`);
-    const contractInfo = await getContractInfo(normalizedSymbol);
-    const minNotional = contractInfo.minNotional || 10;
-
-    console.log(`🔄 Reintentando con ${minNotional} USDT`);
-    return await placeOrderInternal({
-      symbol: normalizedSymbol,
-      side,
-      leverage,
-      usdtAmount: minNotional
-    });
+    console.error(`❌ Error en placeOrderWithSmartRetry:`, error.message);
+    throw error;
   }
 }
 
