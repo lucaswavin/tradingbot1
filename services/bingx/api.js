@@ -77,7 +77,23 @@ async function getCurrentPrice(symbol) {
   }
 }
 
-// Función para obtener información del contrato y mínimos
+// Mínimos conocidos para modo "Por costo - USDT"
+const KNOWN_MINIMUMS = {
+  'BTC-USDT': 200,   // Aproximado basado en experiencia
+  'SOL-USDT': 5,     // Estimado conservador
+  'ETH-USDT': 50,    // Estimado conservador  
+  'DOGE-USDT': 1,    // Estimado conservador
+  'SHIB-USDT': 1,    // Estimado conservador
+  'PEPE-USDT': 1,    // Estimado conservador
+  'DEFAULT': 10      // Mínimo por defecto conservador
+};
+
+// Función para obtener mínimo conocido
+function getKnownMinimum(symbol, fallbackAmount = 10) {
+  const minimum = KNOWN_MINIMUMS[symbol] || KNOWN_MINIMUMS['DEFAULT'];
+  console.log(`📋 Mínimo conocido para ${symbol}: ${minimum} USDT`);
+  return Math.max(minimum, fallbackAmount);
+}
 async function getContractInfo(symbol) {
   console.log(`📋 Obteniendo info del contrato para: ${symbol}`);
   
@@ -218,23 +234,24 @@ async function placeOrderWithMinimumCheck({ symbol, side, leverage = 5, desiredU
   try {
     // 1. Obtener info del contrato para conocer el mínimo real
     const normalizedSymbol = normalizeSymbol(symbol);
+    console.log(`🔄 Símbolo después de normalizar: ${normalizedSymbol}`);
+    
     const contractInfo = await getContractInfo(normalizedSymbol);
     
     console.log(`📏 Mínimo del contrato: ${contractInfo.minNotional} USDT`);
     console.log(`💰 Cantidad deseada: ${desiredUsdtAmount} USDT`);
     
-    // 2. Lógica simple: Si mínimo < 1 → usar 1, si mínimo > 1 → usar el mínimo
-    let finalAmount;
-    if (contractInfo.minNotional <= 1) {
-      finalAmount = Math.max(desiredUsdtAmount, 1); // Usar deseado o mínimo 1
-      console.log(`✅ Mínimo bajo: usando ${finalAmount} USDT`);
-    } else {
-      finalAmount = Math.max(desiredUsdtAmount, contractInfo.minNotional);
-      console.log(`⚡ Mínimo alto: usando ${finalAmount} USDT (mínimo requerido)`);
-    }
+    // 2. Usar mínimos conocidos + info del contrato
+    const knownMinimum = getKnownMinimum(normalizedSymbol, desiredUsdtAmount);
+    let finalAmount = Math.max(desiredUsdtAmount, knownMinimum);
+    
+    console.log(`📏 Mínimo conocido: ${knownMinimum} USDT`);
+    console.log(`💰 Cantidad deseada: ${desiredUsdtAmount} USDT`);
+    console.log(`✅ Cantidad final: ${finalAmount} USDT`);
     
     // 3. Ejecutar orden con la cantidad correcta
-    console.log(`🎯 Cantidad final: ${finalAmount} USDT`);
+    console.log(`🎯 Cantidad final decidida: ${finalAmount} USDT`);
+    console.log(`🎯 Símbolo final: ${normalizedSymbol}`);
     
     const result = await placeOrderInternal({ 
       symbol: normalizedSymbol, 
@@ -265,25 +282,27 @@ async function placeOrderInternal({ symbol, side, leverage = 5, usdtAmount = 1 }
     console.log('\n--- PASO 1: Establecer Leverage ---');
     await setLeverage(symbol, leverage);
 
-    // 2. Calcular quantity
-    console.log('\n--- PASO 2: Calcular Quantity ---');
-    const quantity = await calculateQuantity(symbol, usdtAmount, leverage);
+    // 2. NO calcular quantity - usar directamente el monto en USDT
+    console.log('\n--- PASO 2: Preparar Orden por Costo USDT ---');
+    console.log(`💰 Monto directo en USDT: ${usdtAmount}`);
 
-    // 3. Preparar payload EXACTO según código oficial BingX
-    console.log('\n--- PASO 3: Preparar Payload Oficial ---');
+    // 3. Preparar payload para modo "Por costo - USDT"
+    console.log('\n--- PASO 3: Preparar Payload Por Costo ---');
     const timestamp = new Date().getTime();
     const orderSide = side.toUpperCase();
     
-    // PAYLOAD EXACTO según ejemplo oficial de BingX
+    // PAYLOAD PARA MODO "POR COSTO" - USDT
     const payload = {
       symbol: symbol,
       side: orderSide,
       positionSide: orderSide === 'BUY' ? 'LONG' : 'SHORT',
       type: 'MARKET',
-      quantity: quantity
+      quoteOrderQty: usdtAmount.toString(), // ← Cantidad en USDT (modo "por costo")
+      workingType: 'CONTRACT_PRICE',
+      priceProtect: 'false'
     };
 
-    console.log('📋 Payload oficial BingX:', payload);
+    console.log('📋 Payload BingX (modo por costo USDT):', payload);
 
     // 4. Construir parámetros usando función oficial
     console.log('\n--- PASO 4: Construir Parámetros Oficiales ---');
@@ -298,7 +317,7 @@ async function placeOrderInternal({ symbol, side, leverage = 5, usdtAmount = 1 }
     console.log('🔐 Firma generada:', signature.substring(0, 16) + '...');
 
     // 6. Ejecutar orden con formato OFICIAL
-    console.log('\n--- PASO 5: Ejecutar Orden Oficial ---');
+    console.log('\n--- PASO 5: Ejecutar Orden Por Costo ---');
     
     const url = `https://${HOST}/openApi/swap/v2/trade/order?${parametersUrlEncoded}&signature=${signature}`;
     console.log('🌐 URL orden completa:', url);
@@ -363,9 +382,9 @@ async function placeOrderInternal({ symbol, side, leverage = 5, usdtAmount = 1 }
   }
 }
 
-// Función principal que usa check mínimo inteligente
+// Función principal que usa el retry inteligente
 async function placeOrder(params) {
-  return await placeOrderWithMinimumCheck(params);
+  return await placeOrderWithSmartRetry(params);
 }
 
 // Función para obtener balance
