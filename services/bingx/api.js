@@ -6,7 +6,7 @@ const API_KEY = process.env.BINGX_API_KEY;
 const API_SECRET = process.env.BINGX_API_SECRET;
 const HOST = "open-api.bingx.com";
 
-// ⚡ POOL DE CONEXIONES ULTRA-RÁPIDO PARA SINGAPORE
+// ⚡ OPTIMIZACIÓN: Pool de conexiones rápido
 const ultraFastAgent = new https.Agent({
   keepAlive: true,
   keepAliveMsecs: 1000,
@@ -16,16 +16,14 @@ const ultraFastAgent = new https.Agent({
   freeSocketTimeout: 4000
 });
 
-// ⚡ INSTANCIA AXIOS OPTIMIZADA
+// ⚡ OPTIMIZACIÓN: Instancia axios
 const fastAxios = axios.create({
   httpsAgent: ultraFastAgent,
   timeout: 3000,
   headers: {
     'Connection': 'keep-alive',
-    'Content-Type': 'application/json',
-    'User-Agent': 'TradingBot/1.0'
-  },
-  validateStatus: () => true
+    'Content-Type': 'application/json'
+  }
 });
 
 console.log('🔑 BingX API Keys configuradas:', {
@@ -33,7 +31,6 @@ console.log('🔑 BingX API Keys configuradas:', {
   secret: API_SECRET ? `${API_SECRET.substring(0, 8)}...` : 'NO CONFIGURADA'
 });
 
-// ⚡ NORMALIZACIÓN ULTRA-RÁPIDA
 function normalizeSymbol(symbol) {
   if (!symbol) return symbol;
   console.log(`🔄 Normalizando símbolo: ${symbol}`);
@@ -45,72 +42,46 @@ function normalizeSymbol(symbol) {
   return base;
 }
 
-// 🔧 PARÁMETROS CORREGIDOS (CON ORDENAMIENTO OBLIGATORIO PARA BINGX)
-function getParametersFast(payload, timestamp) {
+// 🔧 ESTA ES LA FUNCIÓN CORREGIDA (solo agregué .sort())
+function getParameters(payload, timestamp, urlEncode = false) {
   let parameters = "";
   
-  // CRÍTICO: BingX requiere parámetros ordenados alfabéticamente
+  // ✅ ORDEN ALFABÉTICO OBLIGATORIO PARA BINGX
   const sortedKeys = Object.keys(payload).sort();
   
   for (const key of sortedKeys) {
     if (payload[key] !== undefined && payload[key] !== null) {
-      parameters += `${key}=${payload[key]}&`;
+      parameters += urlEncode
+        ? `${key}=${encodeURIComponent(payload[key])}&`
+        : `${key}=${payload[key]}&`;
     }
   }
   parameters += `timestamp=${timestamp}`;
   return parameters;
 }
 
-// 🔧 FUNCIÓN PARA URL ENCODING (necesaria para algunos endpoints)
-function getParametersUrlEncoded(payload, timestamp) {
-  let parameters = "";
-  
-  const sortedKeys = Object.keys(payload).sort();
-  
-  for (const key of sortedKeys) {
-    if (payload[key] !== undefined && payload[key] !== null) {
-      parameters += `${key}=${encodeURIComponent(payload[key])}&`;
-    }
-  }
-  parameters += `timestamp=${timestamp}`;
-  return parameters;
-}
-
-// ⚡ PRECIO ULTRA-RÁPIDO (con cache)
-const priceCache = new Map();
 async function getCurrentPrice(symbol) {
-  const cacheKey = symbol;
-  const cached = priceCache.get(cacheKey);
-  
-  // Cache de 5 segundos para velocidad
-  if (cached && (Date.now() - cached.timestamp) < 5000) {
-    return cached.price;
-  }
-
   try {
-    const response = await fastAxios.get(`https://${HOST}/openApi/swap/v2/quote/price?symbol=${symbol}`);
-    const data = typeof response.data === 'string' ? JSON.parse(response.data) : response.data;
-    
-    if (data?.code === 0) {
-      const price = parseFloat(data.data.price);
-      priceCache.set(cacheKey, { price, timestamp: Date.now() });
-      return price;
+    // ⚡ OPTIMIZACIÓN: Usar fastAxios en lugar de axios
+    const url = `https://${HOST}/openApi/swap/v2/quote/price?symbol=${symbol}`;
+    const response = await fastAxios.get(url, { timeout: 5000 });
+    if (response.data?.code === 0) {
+      return parseFloat(response.data.data.price);
     }
-    throw new Error(`Respuesta inválida: ${JSON.stringify(data)}`);
+    throw new Error(`Respuesta inválida: ${JSON.stringify(response.data)}`);
   } catch (error) {
     console.error('❌ Error obteniendo precio:', error.message);
     throw error;
   }
 }
 
-// ⚡ CONTRATO INFO OPTIMIZADA
 async function getContractInfo(symbol) {
   try {
-    const response = await fastAxios.get(`https://${HOST}/openApi/swap/v2/quote/contracts`);
-    const data = typeof response.data === 'string' ? JSON.parse(response.data) : response.data;
-    
-    if (data?.code === 0) {
-      const contract = data.data.find(c => c.symbol === symbol);
+    // ⚡ OPTIMIZACIÓN: Usar fastAxios
+    const url = `https://${HOST}/openApi/swap/v2/quote/contracts`;
+    const response = await fastAxios.get(url, { timeout: 5000 });
+    if (response.data?.code === 0) {
+      const contract = response.data.data.find(c => c.symbol === symbol);
       if (contract) {
         return {
           minOrderQty: parseFloat(contract.minOrderQty || '0.001'),
@@ -127,54 +98,46 @@ async function getContractInfo(symbol) {
   return { minOrderQty: 0.001, tickSize: 0.01, stepSize: 0.001, minNotional: 1 };
 }
 
-// ⚡ LEVERAGE ULTRA-RÁPIDO (con firma corregida)
 async function setLeverage(symbol, leverage = 5) {
   if (!API_KEY || !API_SECRET) throw new Error('API key/secret no configurados');
 
   try {
     const timestamp = Date.now();
-    const payload = { symbol, side: "LONG", leverage };
-    
-    // Usar parámetros sin encoding para firma
-    const parameters = getParametersFast(payload, timestamp);
+    const payload = {
+      symbol,
+      side: "LONG",
+      leverage
+    };
+    // ✅ CORRECCIÓN: Usar función corregida
+    const parameters = getParameters(payload, timestamp, false);
+    const parametersUrlEncoded = getParameters(payload, timestamp, true);
     const signature = crypto.createHmac('sha256', API_SECRET).update(parameters).digest('hex');
-    
-    // Usar parámetros con encoding para URL
-    const parametersUrlEncoded = getParametersUrlEncoded(payload, timestamp);
     const url = `https://${HOST}/openApi/swap/v2/trade/leverage?${parametersUrlEncoded}&signature=${signature}`;
     
+    // ⚡ OPTIMIZACIÓN: Usar fastAxios + timeout reducido
     const response = await fastAxios.post(url, null, {
       headers: { 'X-BX-APIKEY': API_KEY },
+      timeout: 5000, // Reducido de 8000
       transformResponse: (resp) => resp
     });
-    
-    const data = typeof response.data === 'string' ? JSON.parse(response.data) : response.data;
-    return data;
+    return JSON.parse(response.data);
   } catch (error) {
     console.warn('⚠️ Error al establecer leverage:', error.message);
     return null;
   }
 }
 
-// 🚀 FUNCIÓN PRINCIPAL ULTRA-OPTIMIZADA (CON FIRMA CORREGIDA)
 async function placeOrderInternal({ symbol, side, leverage = 5, usdtAmount = 1 }) {
-  const startTime = Date.now();
-  
   if (!API_KEY || !API_SECRET) throw new Error('API key/secret no configurados');
 
   try {
-    // 1. Establecer leverage (en paralelo con precio)
-    const leveragePromise = setLeverage(symbol, leverage);
-    const pricePromise = getCurrentPrice(symbol);
-    
-    // 2. Ejecutar en paralelo para velocidad
-    const [leverageResult, price] = await Promise.all([leveragePromise, pricePromise]);
-    
+    await setLeverage(symbol, leverage);
+
+    const price = await getCurrentPrice(symbol);
     console.log(`💰 Precio actual de ${symbol}: ${price} USDT`);
     console.log(`💳 Margin deseado: ${usdtAmount} USDT`);
     console.log(`⚡ Leverage: ${leverage}x`);
     
-    // 3. Cálculo optimizado
     const buyingPower = usdtAmount * leverage;
     console.log(`🚀 Poder de compra: ${usdtAmount} USDT × ${leverage}x = ${buyingPower} USDT`);
     
@@ -185,7 +148,6 @@ async function placeOrderInternal({ symbol, side, leverage = 5, usdtAmount = 1 }
     console.log(`🧮 Quantity calculada: ${quantity} (${buyingPower} USDT ÷ ${price})`);
     console.log(`📊 Margin estimado a usar: ~${(quantity * price) / leverage} USDT`);
 
-    // 4. Payload optimizado
     const timestamp = Date.now();
     const orderSide = side.toUpperCase();
     const payload = {
@@ -200,28 +162,21 @@ async function placeOrderInternal({ symbol, side, leverage = 5, usdtAmount = 1 }
 
     console.log('📋 Payload orden:', payload);
 
-    // 5. Firma corregida
-    const parameters = getParametersFast(payload, timestamp);
-    const parametersUrlEncoded = getParametersUrlEncoded(payload, timestamp);
+    // ✅ CORRECCIÓN: Usar función corregida
+    const parameters = getParameters(payload, timestamp, false);
+    const parametersUrlEncoded = getParameters(payload, timestamp, true);
     const signature = crypto.createHmac('sha256', API_SECRET).update(parameters).digest('hex');
     const url = `https://${HOST}/openApi/swap/v2/trade/order?${parametersUrlEncoded}&signature=${signature}`;
 
-    // 6. Request directo
+    // ⚡ OPTIMIZACIÓN: fastAxios + timeout reducido
     const response = await fastAxios.post(url, null, {
       headers: { 'X-BX-APIKEY': API_KEY },
+      timeout: 5000, // Reducido de 10000
       transformResponse: (resp) => resp
     });
 
-    const latency = Date.now() - startTime;
-    console.log(`⚡ Orden procesada en ${latency}ms`);
-
-    const data = typeof response.data === 'string' ? JSON.parse(response.data) : response.data;
-    return data;
-
+    return JSON.parse(response.data);
   } catch (error) {
-    const latency = Date.now() - startTime;
-    console.error(`❌ Error en ${latency}ms:`, error.message);
-    
     const data = error.response?.data;
     return {
       success: false,
@@ -231,7 +186,6 @@ async function placeOrderInternal({ symbol, side, leverage = 5, usdtAmount = 1 }
   }
 }
 
-// ⚡ SMART RETRY OPTIMIZADO
 async function placeOrderWithSmartRetry(params) {
   const { symbol, side, leverage = 5 } = params;
   const normalizedSymbol = normalizeSymbol(symbol);
@@ -239,7 +193,6 @@ async function placeOrderWithSmartRetry(params) {
   console.log(`🚀 Intentando orden con 1 USDT para ${normalizedSymbol}...`);
 
   try {
-    // Primer intento con 1 USDT
     const result = await placeOrderInternal({
       symbol: normalizedSymbol,
       side,
@@ -247,13 +200,11 @@ async function placeOrderWithSmartRetry(params) {
       usdtAmount: 1
     });
 
-    // Si es exitoso, retornar
     if (result && result.code === 0) {
       console.log(`✅ ÉXITO con 1 USDT`);
       return result;
     }
 
-    // Verificar si es error de mínimo y necesita retry
     const errorMsg = result?.msg || result?.message || JSON.stringify(result);
     console.log(`🔍 Analizando error: "${errorMsg}"`);
     
@@ -266,23 +217,19 @@ async function placeOrderWithSmartRetry(params) {
     if (needsRetry) {
       console.warn(`⚠️ Orden con 1 USDT falló (mínimo insuficiente), calculando mínimo real...`);
       
-      // Extraer el mínimo del mensaje de error
       let minimumRequired = null;
       
-      // Buscar patrón: "30.2 FHE" o "X.X SYMBOL"
       const match = errorMsg.match(/([\d.]+)\s+([A-Z]+)/);
       if (match) {
         const minQuantity = parseFloat(match[1]);
         const assetSymbol = match[2];
         console.log(`📏 Mínimo extraído: ${minQuantity} ${assetSymbol}`);
         
-        // Calcular el USDT equivalente
         const price = await getCurrentPrice(normalizedSymbol);
         minimumRequired = minQuantity * price;
         console.log(`💰 Mínimo en USDT: ${minimumRequired} USDT (${minQuantity} × ${price})`);
       }
       
-      // Si no pudo extraer, usar mínimo del contrato
       if (!minimumRequired) {
         console.log(`⚠️ No pudo extraer mínimo del error, consultando contrato...`);
         const contractInfo = await getContractInfo(normalizedSymbol);
@@ -290,7 +237,6 @@ async function placeOrderWithSmartRetry(params) {
         console.log(`📋 Usando mínimo del contrato: ${minimumRequired} USDT`);
       }
 
-      // Agregar un buffer del 10%
       const finalAmount = Math.ceil(minimumRequired * 1.1 * 100) / 100;
       console.log(`🔄 Reintentando con ${finalAmount} USDT (mínimo + 10% buffer)`);
       
@@ -308,7 +254,6 @@ async function placeOrderWithSmartRetry(params) {
       return retryResult;
     }
     
-    // Si no necesita retry, retornar el error original
     console.log(`❌ Error no relacionado con mínimos, no reintentando`);
     return result;
     
@@ -318,12 +263,10 @@ async function placeOrderWithSmartRetry(params) {
   }
 }
 
-// Función principal
 async function placeOrder(params) {
   return await placeOrderWithSmartRetry(params);
 }
 
-// ⚡ BALANCE ULTRA-RÁPIDO (CON FIRMA CORREGIDA)
 async function getUSDTBalance() {
   if (!API_KEY || !API_SECRET) throw new Error('API key/secret no configurados');
 
@@ -333,8 +276,10 @@ async function getUSDTBalance() {
     const signature = crypto.createHmac('sha256', API_SECRET).update(parameters).digest('hex');
     const url = `https://${HOST}/openApi/swap/v2/user/balance?${parameters}&signature=${signature}`;
     
+    // ⚡ OPTIMIZACIÓN: fastAxios + timeout reducido
     const response = await fastAxios.get(url, {
       headers: { 'X-BX-APIKEY': API_KEY },
+      timeout: 5000, // Reducido de 8000
       transformResponse: (resp) => resp
     });
 
@@ -343,14 +288,12 @@ async function getUSDTBalance() {
     const data = typeof response.data === 'string' ? JSON.parse(response.data) : response.data;
     
     if (data.code === 0) {
-      // Manejar diferentes formatos de respuesta
       if (data.data && data.data.balance) {
         if (typeof data.data.balance === 'object' && data.data.balance.balance) {
           return parseFloat(data.data.balance.balance);
         }
       }
       
-      // Formato array: { data: [{ asset: "USDT", balance: "123.45" }] }
       if (Array.isArray(data.data)) {
         const usdt = data.data.find(d => d.asset === 'USDT');
         return parseFloat(usdt?.balance || 0);
@@ -360,41 +303,36 @@ async function getUSDTBalance() {
     throw new Error(`Formato de respuesta inesperado: ${JSON.stringify(data)}`);
   } catch (error) {
     console.error('❌ Error obteniendo balance:', error.message);
+    console.error('🔍 Error details:', error);
     throw error;
   }
 }
 
-// ⚡ CLOSE POSITION ULTRA-RÁPIDO (CON FIRMA CORREGIDA)
 async function closePosition(symbol, side = 'BOTH') {
-  const startTime = Date.now();
-  
   if (!API_KEY || !API_SECRET) throw new Error('API key/secret no configurados');
 
   try {
     const timestamp = Date.now();
     const normalizedSymbol = normalizeSymbol(symbol);
-    const payload = { symbol: normalizedSymbol, side: side, type: 'MARKET' };
-    
-    // Usar firma corregida
-    const parameters = getParametersFast(payload, timestamp);
-    const parametersUrlEncoded = getParametersUrlEncoded(payload, timestamp);
+    const payload = {
+      symbol: normalizedSymbol,
+      side: side,
+      type: 'MARKET'
+    };
+    // ✅ CORRECCIÓN: Usar función corregida
+    const parameters = getParameters(payload, timestamp, false);
+    const parametersUrlEncoded = getParameters(payload, timestamp, true);
     const signature = crypto.createHmac('sha256', API_SECRET).update(parameters).digest('hex');
     const url = `https://${HOST}/openApi/swap/v2/trade/closeAllPositions?${parametersUrlEncoded}&signature=${signature}`;
 
+    // ⚡ OPTIMIZACIÓN: fastAxios + timeout reducido
     const response = await fastAxios.post(url, null, {
       headers: { 'X-BX-APIKEY': API_KEY },
+      timeout: 5000, // Reducido de 10000
       transformResponse: (resp) => resp
     });
-
-    const latency = Date.now() - startTime;
-    console.log(`⚡ Close procesado en ${latency}ms`);
-
-    const data = typeof response.data === 'string' ? JSON.parse(response.data) : response.data;
-    return data;
+    return JSON.parse(response.data);
   } catch (error) {
-    const latency = Date.now() - startTime;
-    console.error(`❌ Error close en ${latency}ms:`, error.message);
-    
     const data = error.response?.data;
     return {
       success: false,
