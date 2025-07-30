@@ -1,14 +1,11 @@
 require('dotenv').config();
-const { placeOrder, getUSDTBalance } = require('../services/bingx/api');
+const { placeOrder, getUSDTBalance, closePosition, closeAllPositions } = require('../services/bingx/api');
 
 // Función original para mostrar señales en dashboard
 exports.handleWebhook = async (req, res) => {
   console.log('\n📨 ===== WEBHOOK RECIBIDO =====');
   const data = req.body;
   console.log('📋 Datos completos del webhook:', JSON.stringify(data, null, 2));
-  console.log('🌐 Headers:', JSON.stringify(req.headers, null, 2));
-  console.log('🔗 URL:', req.url);
-  console.log('🔗 Method:', req.method);
   
   if (!global.botState) global.botState = { signals: [] };
   
@@ -26,76 +23,120 @@ exports.handleWebhook = async (req, res) => {
   res.json({ success: true, message: 'Señal recibida', data });
 };
 
-// Función para trading automático con BingX
+// Función mejorada para trading automático con BingX
 exports.handleTradingViewWebhook = async (req, res) => {
   console.log('\n🚀 ===== TRADING WEBHOOK RECIBIDO =====');
-  const { symbol, side, webhook_secret, action, qty } = req.body;
+  const { symbol, side, webhook_secret, action, qty, strategy } = req.body;
   
   console.log('📋 Datos del trading webhook:', JSON.stringify(req.body, null, 2));
-  console.log('🌐 Headers recibidos:', JSON.stringify(req.headers, null, 2));
-  console.log('🔗 URL completa:', req.url);
-  console.log('🔗 IP origen:', req.ip || req.connection.remoteAddress);
+  console.log('🔍 Action detectado:', action);
+  console.log('🔍 Strategy detectado:', strategy);
 
-  // Verificar webhook secret si está configurado
-  console.log('\n--- VERIFICANDO SEGURIDAD ---');
-  console.log('🔐 Webhook secret configurado:', process.env.WEBHOOK_SECRET ? 'SÍ' : 'NO');
-  console.log('🔐 Secret recibido:', webhook_secret ? `${webhook_secret.substring(0, 5)}...` : 'NO ENVIADO');
-  
+  // Verificar webhook secret
   if (process.env.WEBHOOK_SECRET && webhook_secret !== process.env.WEBHOOK_SECRET) {
-    console.log('❌ WEBHOOK SECRET INVÁLIDO');
     return res.status(401).json({ ok: false, msg: 'Webhook secret inválido' });
   }
-  console.log('✅ Secret válido o no requerido');
 
   // Validaciones básicas
-  console.log('\n--- VALIDANDO PARÁMETROS ---');
-  console.log('📊 Symbol:', symbol);
-  console.log('📊 Side:', side);
-  console.log('📊 Action:', action);
-  console.log('📊 Quantity:', qty);
-  
   if (!symbol || !side) {
-    console.log('❌ FALTAN PARÁMETROS REQUERIDOS');
     return res.status(400).json({ 
       ok: false, 
-      msg: 'Faltan parámetros requeridos: symbol y side',
-      received: { symbol, side, action, qty }
+      msg: 'Faltan parámetros requeridos: symbol y side' 
     });
   }
-  console.log('✅ Parámetros básicos válidos');
 
   try {
-    // Chequea balance antes de operar
-    console.log('\n--- VERIFICANDO BALANCE ---');
-    const balance = await getUSDTBalance();
-    console.log(`💰 Balance verificado: ${balance} USDT`);
+    // Determinar qué acción tomar basado en los parámetros
+    console.log('\n--- ANALIZANDO ACCIÓN ---');
+    let actionToTake = 'unknown';
+    let orderSide = '';
     
-    const minBalance = 5;
-    if (balance < minBalance) {
-      console.log(`❌ BALANCE INSUFICIENTE: ${balance} < ${minBalance} USDT`);
-      return res.status(400).json({ 
-        ok: false, 
-        msg: `Balance insuficiente para operar. Mínimo: ${minBalance} USDT`, 
-        balance: balance,
-        required: minBalance
+    // Detectar acción basada en múltiples campos
+    if (action) {
+      console.log(`🎯 Action field: ${action}`);
+      if (action.toLowerCase().includes('close') || action.toLowerCase().includes('exit')) {
+        actionToTake = 'close';
+      } else if (action.toLowerCase().includes('long') || action.toLowerCase().includes('buy')) {
+        actionToTake = 'open_long';
+        orderSide = 'BUY';
+      } else if (action.toLowerCase().includes('short') || action.toLowerCase().includes('sell')) {
+        actionToTake = 'open_short';
+        orderSide = 'SELL';
+      }
+    }
+    
+    // Si no hay action, usar side como fallback
+    if (actionToTake === 'unknown') {
+      const sideUpper = side.toUpperCase();
+      if (sideUpper === 'BUY' || sideUpper === 'LONG') {
+        actionToTake = 'open_long';
+        orderSide = 'BUY';
+      } else if (sideUpper === 'SELL' || sideUpper === 'SHORT') {
+        actionToTake = 'open_short';
+        orderSide = 'SELL';
+      } else if (sideUpper === 'CLOSE' || sideUpper === 'EXIT') {
+        actionToTake = 'close';
+      }
+    }
+    
+    console.log(`✅ Acción determinada: ${actionToTake}`);
+    console.log(`✅ Order side: ${orderSide}`);
+
+    // Chequear balance antes de operar (solo para órdenes de apertura)
+    let balance = 0;
+    if (actionToTake.includes('open')) {
+      console.log('\n--- VERIFICANDO BALANCE ---');
+      balance = await getUSDTBalance();
+      console.log(`💰 Balance verificado: ${balance} USDT`);
+      
+      const minBalance = 2;
+      if (balance < minBalance) {
+        console.log(`❌ BALANCE INSUFICIENTE: ${balance} < ${minBalance} USDT`);
+        return res.status(400).json({ 
+          ok: false, 
+          msg: `Balance insuficiente para operar. Mínimo: ${minBalance} USDT`, 
+          balance: balance,
+          required: minBalance
+        });
+      }
+      console.log('✅ Balance suficiente para operar');
+    }
+
+    let response;
+    
+    // Ejecutar acción correspondiente
+    console.log('\n--- EJECUTANDO ACCIÓN ---');
+    
+    if (actionToTake === 'close') {
+      console.log('🔒 CERRANDO POSICIÓN');
+      console.log(`🎯 Cerrando todas las posiciones para: ${symbol}`);
+      
+      response = await closeAllPositions(symbol);
+      
+    } else if (actionToTake === 'open_long' || actionToTake === 'open_short') {
+      console.log(`📈 ABRIENDO POSICIÓN: ${actionToTake.toUpperCase()}`);
+      console.log(`🎯 Orden a ejecutar: ${orderSide} ${symbol}`);
+      console.log('⚙️ Configuración: 5x leverage, 1 USDT o mínimo requerido');
+      
+      response = await placeOrder({
+        symbol,
+        side: orderSide,
+        leverage: 5,
+        usdtAmount: 1  // 1 USDT o el mínimo que requiera BingX
+      });
+      
+    } else {
+      console.log('❓ ACCIÓN NO RECONOCIDA');
+      return res.status(400).json({
+        ok: false,
+        msg: 'Acción no reconocida',
+        received: { symbol, side, action, strategy },
+        help: 'Use action: "close", "long", "short" o side: "buy", "sell", "close"'
       });
     }
-    console.log('✅ Balance suficiente para operar');
-
-    // Ejecuta la orden
-    console.log('\n--- EJECUTANDO ORDEN EN BINGX ---');
-    console.log(`🎯 Orden a ejecutar: ${side.toUpperCase()} ${symbol}`);
-    console.log('⚙️ Configuración: 5x leverage, 5 USDT por orden');
-    
-    const response = await placeOrder({
-      symbol,
-      side,
-      leverage: 5,
-      usdtAmount: 5
-    });
 
     console.log('\n--- PROCESANDO RESPUESTA ---');
-    console.log('📨 Respuesta completa de BingX:', JSON.stringify(response, null, 2));
+    console.log('📨 Respuesta completa:', JSON.stringify(response, null, 2));
 
     // Guarda la señal para el dashboard
     if (!global.botState) global.botState = { signals: [] };
@@ -104,6 +145,8 @@ exports.handleTradingViewWebhook = async (req, res) => {
       symbol,
       side: side.toUpperCase(),
       action: action || side,
+      actionTaken: actionToTake,
+      orderSide: orderSide,
       timestamp: new Date().toLocaleString(),
       receivedAt: new Date().toISOString(),
       data: req.body,
@@ -118,13 +161,16 @@ exports.handleTradingViewWebhook = async (req, res) => {
 
     // Evaluar respuesta
     if (response && (response.code === 0 || response.success === true)) {
-      console.log('✅ ORDEN EJECUTADA EXITOSAMENTE');
-      console.log('🎉 Order ID:', response.data?.orderId || 'N/A');
+      console.log('✅ ACCIÓN EJECUTADA EXITOSAMENTE');
+      if (response.data && response.data.orderId) {
+        console.log('🎉 Order ID:', response.data.orderId);
+      }
       console.log('=====================================\n');
       
       return res.json({ 
         ok: true, 
-        msg: 'Trade ejecutado exitosamente en BingX', 
+        msg: `${actionToTake} ejecutado exitosamente en BingX`, 
+        action: actionToTake,
         data: response.data || response,
         balance: balance,
         timestamp: new Date().toISOString()
@@ -137,7 +183,8 @@ exports.handleTradingViewWebhook = async (req, res) => {
       
       return res.status(400).json({ 
         ok: false, 
-        msg: 'Error ejecutando orden en BingX', 
+        msg: `Error ejecutando ${actionToTake} en BingX`, 
+        action: actionToTake,
         data: response,
         errorCode: response?.code,
         errorMessage: response?.msg || response?.message
@@ -178,7 +225,7 @@ exports.handleTradingViewWebhook = async (req, res) => {
   }
 };
 
-// Función adicional para debug
+// Resto de funciones (test, status, etc.)
 exports.testConnection = async (req, res) => {
   console.log('\n🔧 ===== TEST DE CONEXIÓN =====');
   
@@ -212,10 +259,7 @@ exports.testConnection = async (req, res) => {
   }
 };
 
-// Debug: mostrar estado del bot
 exports.getStatus = (req, res) => {
-  console.log('\n📊 ===== ESTADO DEL BOT =====');
-  
   const signals = global.botState?.signals || [];
   const lastSignals = signals.slice(-10);
   
@@ -224,13 +268,12 @@ exports.getStatus = (req, res) => {
     successfulTrades: signals.filter(s => s.orderSuccess === true).length,
     failedTrades: signals.filter(s => s.tradingExecuted === true && s.orderSuccess !== true).length,
     errorsCount: signals.filter(s => s.error).length,
+    closeActions: signals.filter(s => s.actionTaken === 'close').length,
+    openActions: signals.filter(s => s.actionTaken && s.actionTaken.includes('open')).length,
     lastSignalTime: signals.length > 0 ? signals[signals.length - 1].timestamp : 'Nunca',
     apiConfigured: !!(process.env.BINGX_API_KEY && process.env.BINGX_API_SECRET),
     webhookSecretConfigured: !!process.env.WEBHOOK_SECRET
   };
-  
-  console.log('📈 Estadísticas:', stats);
-  console.log('============================\n');
   
   res.json({
     ok: true,
@@ -239,5 +282,4 @@ exports.getStatus = (req, res) => {
     timestamp: new Date().toISOString()
   });
 };
-
 
