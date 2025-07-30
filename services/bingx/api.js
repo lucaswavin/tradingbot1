@@ -122,45 +122,28 @@ async function getContractInfo(symbol) {
   }
 }
 
-// Calcula quantity basado en USDT a invertir O MÍNIMO REQUERIDO
-async function calculateQuantity(symbol, desiredUsdtAmount = 1, leverage = 5) {
+// Calcula quantity basado en USDT a invertir (versión simplificada)
+async function calculateQuantity(symbol, usdtAmount, leverage = 5) {
   console.log(`🧮 Calculando quantity para ${symbol}`);
-  console.log(`💰 USDT deseados: ${desiredUsdtAmount} USDT`);
+  console.log(`💰 USDT finales: ${usdtAmount} USDT`);
   console.log(`⚡ Leverage: ${leverage}x`);
   
   try {
-    // Obtener precio actual e info del contrato
-    const [price, contractInfo] = await Promise.all([
-      getCurrentPrice(symbol),
-      getContractInfo(symbol)
-    ]);
-    
+    const price = await getCurrentPrice(symbol);
     console.log(`💵 Precio actual: ${price} USDT`);
-    console.log(`📏 Mínimo notional: ${contractInfo.minNotional} USDT`);
-    console.log(`📏 Quantity mínima: ${contractInfo.minOrderQty}`);
     
-    // Usar el mayor entre lo deseado y el mínimo requerido
-    const usdtAmount = Math.max(desiredUsdtAmount, contractInfo.minNotional);
-    console.log(`✅ USDT a usar: ${usdtAmount} USDT (${usdtAmount === desiredUsdtAmount ? 'deseado' : 'mínimo requerido'})`);
-    
-    // Calcular quantity
+    // Calcular quantity directamente
     let quantity = usdtAmount / price;
     
-    console.log(`📐 Quantity inicial: ${quantity}`);
+    console.log(`📐 Quantity calculada: ${quantity}`);
     
-    // Ajustar al stepSize del contrato
-    quantity = Math.max(
-      contractInfo.minOrderQty,
-      Math.floor(quantity / contractInfo.stepSize) * contractInfo.stepSize
-    );
-    
-    // Redondear a la precisión correcta
-    const decimals = contractInfo.stepSize.toString().split('.')[1]?.length || 3;
-    quantity = parseFloat(quantity.toFixed(decimals));
+    // Redondear a 3 decimales (ajustar según necesidad)
+    quantity = Math.round(quantity * 1000) / 1000;
+    quantity = Math.max(0.001, quantity); // Mínimo técnico
     
     console.log(`✅ Quantity final: ${quantity} contratos`);
-    console.log(`💰 Margin estimado: ~${quantity * price} USDT`);
-    console.log(`📊 Exposición con ${leverage}x: ~${quantity * price * leverage} USDT`);
+    console.log(`💰 Margin estimado: ~${usdtAmount} USDT`);
+    console.log(`📊 Exposición con ${leverage}x: ~${usdtAmount * leverage} USDT`);
     
     return quantity;
     
@@ -227,8 +210,58 @@ async function setLeverage(symbol, leverage = 5) {
   }
 }
 
-// Función principal para colocar orden - FORMATO OFICIAL BINGX
-async function placeOrder({ symbol, side, leverage = 5, usdtAmount = 1 }) {
+// Función para obtener el mínimo real desde el error de BingX
+function extractMinimumFromError(errorMessage) {
+  // Buscar patrón: "minimum size for opening an order is X USDT"
+  const match = errorMessage.match(/minimum size for opening an order is ([\d.]+) USDT/i);
+  if (match) {
+    const minimum = parseFloat(match[1]);
+    console.log(`📏 Mínimo extraído del error: ${minimum} USDT`);
+    return minimum;
+  }
+  return null;
+}
+
+// Función mejorada para usar el mínimo inteligente
+async function placeOrderWithMinimumCheck({ symbol, side, leverage = 5, desiredUsdtAmount = 1 }) {
+  console.log('\n🚀 ===== INICIANDO ORDEN CON CHECK MÍNIMO =====');
+  console.log(`📊 Parámetros iniciales:`, { symbol, side, leverage, desiredUsdtAmount });
+  
+  try {
+    // 1. Obtener info del contrato para conocer el mínimo real
+    const normalizedSymbol = normalizeSymbol(symbol);
+    const contractInfo = await getContractInfo(normalizedSymbol);
+    
+    console.log(`📏 Mínimo del contrato: ${contractInfo.minNotional} USDT`);
+    console.log(`💰 Cantidad deseada: ${desiredUsdtAmount} USDT`);
+    
+    // 2. Lógica simple: Si mínimo < 1 → usar 1, si mínimo > 1 → usar el mínimo
+    let finalAmount;
+    if (contractInfo.minNotional <= 1) {
+      finalAmount = Math.max(desiredUsdtAmount, 1); // Usar deseado o mínimo 1
+      console.log(`✅ Mínimo bajo: usando ${finalAmount} USDT`);
+    } else {
+      finalAmount = Math.max(desiredUsdtAmount, contractInfo.minNotional);
+      console.log(`⚡ Mínimo alto: usando ${finalAmount} USDT (mínimo requerido)`);
+    }
+    
+    // 3. Ejecutar orden con la cantidad correcta
+    console.log(`🎯 Cantidad final: ${finalAmount} USDT`);
+    
+    const result = await placeOrderInternal({ 
+      symbol: normalizedSymbol, 
+      side, 
+      leverage, 
+      usdtAmount: finalAmount 
+    });
+    
+    return result;
+    
+  } catch (error) {
+    console.error('❌ Error en placeOrderWithMinimumCheck:', error.message);
+    throw error;
+  }
+}
   console.log('\n🚀 ===== INICIANDO ORDEN =====');
   console.log(`📊 Parámetros recibidos:`, { symbol, side, leverage, usdtAmount });
   
@@ -299,20 +332,19 @@ async function placeOrder({ symbol, side, leverage = 5, usdtAmount = 1 }) {
 
     const response = await axios(config);
 
-    console.log('\n✅ ===== ORDEN EJECUTADA =====');
+    console.log('\n✅ ===== RESPUESTA RECIBIDA =====');
     console.log('📈 Status HTTP:', response.status);
     console.log('🎉 Respuesta BingX raw:', response.data);
     
     // Parsear respuesta JSON
     const responseData = JSON.parse(response.data);
     console.log('🎉 Respuesta BingX parseada:', JSON.stringify(responseData, null, 2));
-    console.log('===========================\n');
     
     return responseData;
 
   } catch (error) {
-    console.log('\n❌ ===== ERROR EN ORDEN =====');
-    console.error('💥 Error en placeOrder:', error.message);
+    console.log('\n❌ ===== ERROR EN ORDEN INTERNA =====');
+    console.error('💥 Error en placeOrderInternal:', error.message);
     
     if (error.response) {
       console.error('📊 Status HTTP:', error.response.status);
@@ -341,10 +373,14 @@ async function placeOrder({ symbol, side, leverage = 5, usdtAmount = 1 }) {
       }
     } else {
       console.error('🌐 Error de red:', error.message);
-      console.log('============================\n');
       throw error;
     }
   }
+}
+
+// Función principal que ahora usa check mínimo inteligente
+async function placeOrder(params) {
+  return await placeOrderWithMinimumCheck(params);
 }
 
 // Función para obtener balance
