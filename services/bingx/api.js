@@ -86,7 +86,8 @@ async function setLeverage(symbol, leverage = 5) {
     const url = `https://${HOST}/openApi/swap/v2/trade/leverage?${parametersUrlEncoded}&signature=${signature}`;
     const response = await axios.post(url, null, {
       headers: { 'X-BX-APIKEY': API_KEY },
-      timeout: 8000
+      timeout: 8000,
+      transformResponse: (resp) => resp // Mantener como string
     });
     return JSON.parse(response.data);
   } catch (error) {
@@ -120,7 +121,8 @@ async function placeOrderInternal({ symbol, side, leverage = 5, usdtAmount = 1 }
 
     const response = await axios.post(url, null, {
       headers: { 'X-BX-APIKEY': API_KEY },
-      timeout: 10000
+      timeout: 10000,
+      transformResponse: (resp) => resp // Mantener como string
     });
 
     return JSON.parse(response.data);
@@ -173,6 +175,7 @@ async function placeOrder(params) {
   return await placeOrderWithSmartRetry(params);
 }
 
+// 💵 Balance function CORREGIDA
 async function getUSDTBalance() {
   if (!API_KEY || !API_SECRET) throw new Error('API key/secret no configurados');
 
@@ -181,18 +184,39 @@ async function getUSDTBalance() {
     const parameters = `timestamp=${timestamp}`;
     const signature = crypto.createHmac('sha256', API_SECRET).update(parameters).digest('hex');
     const url = `https://${HOST}/openApi/swap/v2/user/balance?${parameters}&signature=${signature}`;
+    
     const response = await axios.get(url, {
       headers: { 'X-BX-APIKEY': API_KEY },
-      timeout: 8000
+      timeout: 8000,
+      transformResponse: (resp) => resp // ← CLAVE: Mantener como string
     });
-    const data = JSON.parse(response.data);
-    if (data.code === 0 && Array.isArray(data.data)) {
-      const usdt = data.data.find(d => d.asset === 'USDT');
-      return parseFloat(usdt?.balance || 0);
+
+    console.log('🔍 Balance response type:', typeof response.data);
+    console.log('🔍 Balance response:', response.data);
+
+    // Parsear solo si es string
+    const data = typeof response.data === 'string' ? JSON.parse(response.data) : response.data;
+    
+    if (data.code === 0) {
+      // Manejar diferentes formatos de respuesta
+      if (data.data && data.data.balance) {
+        // Formato: { data: { balance: { balance: "123.45" } } }
+        if (typeof data.data.balance === 'object' && data.data.balance.balance) {
+          return parseFloat(data.data.balance.balance);
+        }
+      }
+      
+      // Formato array: { data: [{ asset: "USDT", balance: "123.45" }] }
+      if (Array.isArray(data.data)) {
+        const usdt = data.data.find(d => d.asset === 'USDT');
+        return parseFloat(usdt?.balance || 0);
+      }
     }
-    throw new Error('Formato de respuesta inesperado');
+    
+    throw new Error(`Formato de respuesta inesperado: ${JSON.stringify(data)}`);
   } catch (error) {
     console.error('❌ Error obteniendo balance:', error.message);
+    console.error('🔍 Error details:', error);
     throw error;
   }
 }
@@ -215,7 +239,8 @@ async function closePosition(symbol, side = 'BOTH') {
 
     const response = await axios.post(url, null, {
       headers: { 'X-BX-APIKEY': API_KEY },
-      timeout: 10000
+      timeout: 10000,
+      transformResponse: (resp) => resp // Mantener como string
     });
     return JSON.parse(response.data);
   } catch (error) {
@@ -243,4 +268,3 @@ module.exports = {
   getContractInfo,
   placeOrderWithSmartRetry
 };
-
