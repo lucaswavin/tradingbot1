@@ -26,7 +26,6 @@ const fastAxios = axios.create({
   }
 });
 
-// ✅ Mostrar claves parcialmente
 console.log('🔑 BingX API Keys configuradas:', {
   apiKey: API_KEY ? `${API_KEY.substring(0, 8)}...` : 'NO CONFIGURADA',
   secret: API_SECRET ? `${API_SECRET.substring(0, 8)}...` : 'NO CONFIGURADA'
@@ -44,18 +43,31 @@ function normalizeSymbol(symbol) {
   return base;
 }
 
-// 🔐 Firmar parámetros ordenados
-function getParameters(payload, timestamp, urlEncode = false) {
+// 🔐 MÉTODO OFICIAL BINGX PARA PARÁMETROS (basado en su documentación)
+function getParametersOfficial(payload, timestamp, urlEncode = false) {
   let parameters = "";
+  
+  // Ordenar alfabéticamente (crítico para BingX)
   const sortedKeys = Object.keys(payload).sort();
+  
   for (const key of sortedKeys) {
     if (payload[key] !== undefined && payload[key] !== null) {
-      parameters += urlEncode
-        ? `${key}=${encodeURIComponent(payload[key])}&`
-        : `${key}=${payload[key]}&`;
+      if (urlEncode) {
+        parameters += `${key}=${encodeURIComponent(payload[key])}&`;
+      } else {
+        parameters += `${key}=${payload[key]}&`;
+      }
     }
   }
-  parameters += `timestamp=${timestamp}`;
+  
+  // Método oficial: quitar último & y agregar timestamp al final
+  if (parameters) {
+    parameters = parameters.substring(0, parameters.length - 1);
+    parameters = parameters + "&timestamp=" + timestamp;
+  } else {
+    parameters = "timestamp=" + timestamp;
+  }
+  
   return parameters;
 }
 
@@ -97,32 +109,33 @@ async function getContractInfo(symbol) {
   return { minOrderQty: 0.001, tickSize: 0.01, stepSize: 0.001, minNotional: 1 };
 }
 
-// ⚙️ Establecer leverage
+// ⚙️ Establecer leverage (MÉTODO OFICIAL)
 async function setLeverage(symbol, leverage = 5) {
   if (!API_KEY || !API_SECRET) throw new Error('API key/secret no configurados');
 
   try {
     const timestamp = Date.now();
     const payload = { symbol, side: "LONG", leverage };
-    const parameters = getParameters(payload, timestamp);
+    
+    // Usar método oficial de BingX
+    const parameters = getParametersOfficial(payload, timestamp);
+    const parametersUrlEncoded = getParametersOfficial(payload, timestamp, true);
     const signature = crypto.createHmac('sha256', API_SECRET).update(parameters).digest('hex');
+    const url = `https://${HOST}/openApi/swap/v2/trade/leverage?${parametersUrlEncoded}&signature=${signature}`;
 
-    const signedPayload = { ...payload, timestamp, signature };
+    const response = await fastAxios.post(url, null, {
+      headers: { 'X-BX-APIKEY': API_KEY },
+      transformResponse: (resp) => resp // Mantener como string (importante)
+    });
 
-    const response = await fastAxios.post(
-      `https://${HOST}/openApi/swap/v2/trade/leverage`,
-      signedPayload,
-      { headers: { 'X-BX-APIKEY': API_KEY } }
-    );
-
-    return response.data;
+    return JSON.parse(response.data);
   } catch (error) {
     console.warn('⚠️ Error al establecer leverage:', error.message);
     return null;
   }
 }
 
-// 🛒 Colocar orden interna
+// 🛒 Colocar orden interna (MÉTODO OFICIAL)
 async function placeOrderInternal({ symbol, side, leverage = 5, usdtAmount = 1 }) {
   if (!API_KEY || !API_SECRET) throw new Error('API key/secret no configurados');
 
@@ -131,8 +144,18 @@ async function placeOrderInternal({ symbol, side, leverage = 5, usdtAmount = 1 }
 
     const price = await getCurrentPrice(symbol);
     console.log(`💰 Precio actual de ${symbol}: ${price} USDT`);
+    console.log(`💳 Margin deseado: ${usdtAmount} USDT`);
+    console.log(`⚡ Leverage: ${leverage}x`);
+    
     const buyingPower = usdtAmount * leverage;
-    let quantity = Math.max(0.001, Math.round((buyingPower / price) * 1000) / 1000);
+    console.log(`🚀 Poder de compra: ${usdtAmount} USDT × ${leverage}x = ${buyingPower} USDT`);
+    
+    let quantity = buyingPower / price;
+    quantity = Math.round(quantity * 1000) / 1000;
+    quantity = Math.max(0.001, quantity);
+    
+    console.log(`🧮 Quantity calculada: ${quantity} (${buyingPower} USDT ÷ ${price})`);
+    console.log(`📊 Margin estimado a usar: ~${(quantity * price) / leverage} USDT`);
 
     const timestamp = Date.now();
     const orderSide = side.toUpperCase();
@@ -146,18 +169,23 @@ async function placeOrderInternal({ symbol, side, leverage = 5, usdtAmount = 1 }
       priceProtect: 'false'
     };
 
-    const parameters = getParameters(payload, timestamp);
+    console.log('📋 Payload orden:', payload);
+
+    // MÉTODO OFICIAL BINGX (igual que su documentación)
+    const parameters = getParametersOfficial(payload, timestamp);
+    const parametersUrlEncoded = getParametersOfficial(payload, timestamp, true);
     const signature = crypto.createHmac('sha256', API_SECRET).update(parameters).digest('hex');
+    const url = `https://${HOST}/openApi/swap/v2/trade/order?${parametersUrlEncoded}&signature=${signature}`;
 
-    const signedPayload = { ...payload, timestamp, signature };
+    console.log('🔧 Debug parameters:', parameters);
+    console.log('🔧 Debug signature:', signature);
 
-    const response = await fastAxios.post(
-      `https://${HOST}/openApi/swap/v2/trade/order`,
-      signedPayload,
-      { headers: { 'X-BX-APIKEY': API_KEY } }
-    );
+    const response = await fastAxios.post(url, null, {
+      headers: { 'X-BX-APIKEY': API_KEY },
+      transformResponse: (resp) => resp // Crítico: mantener como string para big integers
+    });
 
-    return response.data;
+    return JSON.parse(response.data);
   } catch (error) {
     const data = error.response?.data;
     return {
@@ -189,38 +217,58 @@ async function placeOrderWithSmartRetry(params) {
     }
 
     const errorMsg = result?.msg || result?.message || JSON.stringify(result);
-    const needsRetry = /minimum|less than|min notional|insufficient/i.test(errorMsg);
+    console.log(`🔍 Analizando error: "${errorMsg}"`);
+    
+    const needsRetry = errorMsg.includes('minimum') || 
+                       errorMsg.includes('less than') || 
+                       errorMsg.includes('min ') ||
+                       errorMsg.toLowerCase().includes('min notional') ||
+                       errorMsg.includes('insufficient');
 
     if (needsRetry) {
-      console.warn('⚠️ Orden con 1 USDT falló, calculando mínimo...');
-
+      console.warn(`⚠️ Orden con 1 USDT falló (mínimo insuficiente), calculando mínimo real...`);
+      
       let minimumRequired = null;
       const match = errorMsg.match(/([\d.]+)\s+([A-Z]+)/);
       if (match) {
-        const minQty = parseFloat(match[1]);
+        const minQuantity = parseFloat(match[1]);
+        const assetSymbol = match[2];
+        console.log(`📏 Mínimo extraído: ${minQuantity} ${assetSymbol}`);
+        
         const price = await getCurrentPrice(normalizedSymbol);
-        minimumRequired = minQty * price;
+        minimumRequired = minQuantity * price;
+        console.log(`💰 Mínimo en USDT: ${minimumRequired} USDT (${minQuantity} × ${price})`);
       }
-
+      
       if (!minimumRequired) {
+        console.log(`⚠️ No pudo extraer mínimo del error, consultando contrato...`);
         const contractInfo = await getContractInfo(normalizedSymbol);
         minimumRequired = contractInfo.minNotional || 10;
+        console.log(`📋 Usando mínimo del contrato: ${minimumRequired} USDT`);
       }
 
       const finalAmount = Math.ceil(minimumRequired * 1.1 * 100) / 100;
-      console.log(`🔁 Reintentando con ${finalAmount} USDT`);
-
-      return await placeOrderInternal({
+      console.log(`🔄 Reintentando con ${finalAmount} USDT (mínimo + 10% buffer)`);
+      
+      const retryResult = await placeOrderInternal({
         symbol: normalizedSymbol,
         side,
         leverage,
         usdtAmount: finalAmount
       });
+      
+      if (retryResult && retryResult.code === 0) {
+        console.log(`✅ ÉXITO con ${finalAmount} USDT (mínimo de BingX)`);
+      }
+      
+      return retryResult;
     }
-
+    
+    console.log(`❌ Error no relacionado con mínimos, no reintentando`);
     return result;
+    
   } catch (error) {
-    console.error('❌ Error en retry:', error.message);
+    console.error(`❌ Error en placeOrderWithSmartRetry:`, error.message);
     throw error;
   }
 }
@@ -230,7 +278,7 @@ async function placeOrder(params) {
   return await placeOrderWithSmartRetry(params);
 }
 
-// 💵 Obtener balance
+// 💵 Obtener balance (MÉTODO OFICIAL)
 async function getUSDTBalance() {
   if (!API_KEY || !API_SECRET) throw new Error('API key/secret no configurados');
 
@@ -238,18 +286,24 @@ async function getUSDTBalance() {
     const timestamp = Date.now();
     const parameters = `timestamp=${timestamp}`;
     const signature = crypto.createHmac('sha256', API_SECRET).update(parameters).digest('hex');
+    const url = `https://${HOST}/openApi/swap/v2/user/balance?${parameters}&signature=${signature}`;
 
-    const response = await fastAxios.get(`https://${HOST}/openApi/swap/v2/user/balance`, {
-      params: { timestamp, signature },
-      headers: { 'X-BX-APIKEY': API_KEY }
+    const response = await fastAxios.get(url, {
+      headers: { 'X-BX-APIKEY': API_KEY },
+      transformResponse: (resp) => resp // Mantener como string
     });
+
+    console.log('🔍 Balance response type:', typeof response.data);
 
     const data = typeof response.data === 'string' ? JSON.parse(response.data) : response.data;
 
     if (data.code === 0) {
-      if (data.data?.balance?.balance) {
-        return parseFloat(data.data.balance.balance);
+      if (data.data && data.data.balance) {
+        if (typeof data.data.balance === 'object' && data.data.balance.balance) {
+          return parseFloat(data.data.balance.balance);
+        }
       }
+      
       if (Array.isArray(data.data)) {
         const usdt = data.data.find(d => d.asset === 'USDT');
         return parseFloat(usdt?.balance || 0);
@@ -263,8 +317,10 @@ async function getUSDTBalance() {
   }
 }
 
-// ❌ Cerrar posición
+// ❌ Cerrar posición (MÉTODO OFICIAL)
 async function closePosition(symbol, side = 'BOTH') {
+  const startTime = Date.now();
+  
   if (!API_KEY || !API_SECRET) throw new Error('API key/secret no configurados');
 
   try {
@@ -272,22 +328,31 @@ async function closePosition(symbol, side = 'BOTH') {
     const normalizedSymbol = normalizeSymbol(symbol);
     const payload = {
       symbol: normalizedSymbol,
-      side,
+      side: side,
       type: 'MARKET'
     };
 
-    const parameters = getParameters(payload, timestamp);
+    // Usar método oficial de BingX
+    const parameters = getParametersOfficial(payload, timestamp);
+    const parametersUrlEncoded = getParametersOfficial(payload, timestamp, true);
     const signature = crypto.createHmac('sha256', API_SECRET).update(parameters).digest('hex');
-    const signedPayload = { ...payload, timestamp, signature };
+    const url = `https://${HOST}/openApi/swap/v2/trade/closeAllPositions?${parametersUrlEncoded}&signature=${signature}`;
 
-    const response = await fastAxios.post(
-      `https://${HOST}/openApi/swap/v2/trade/closeAllPositions`,
-      signedPayload,
-      { headers: { 'X-BX-APIKEY': API_KEY } }
-    );
+    console.log('🔧 Debug close parameters:', parameters);
 
-    return response.data;
+    const response = await fastAxios.post(url, null, {
+      headers: { 'X-BX-APIKEY': API_KEY },
+      transformResponse: (resp) => resp
+    });
+
+    const latency = Date.now() - startTime;
+    console.log(`⚡ Close procesado en ${latency}ms`);
+
+    return JSON.parse(response.data);
   } catch (error) {
+    const latency = Date.now() - startTime;
+    console.error(`❌ Error close en ${latency}ms:`, error.message);
+    
     const data = error.response?.data;
     return {
       success: false,
