@@ -45,13 +45,31 @@ function normalizeSymbol(symbol) {
   return base;
 }
 
-// ⚡ PARÁMETROS OPTIMIZADOS (sin encoding innecesario)
+// 🔧 PARÁMETROS CORREGIDOS (CON ORDENAMIENTO OBLIGATORIO PARA BINGX)
 function getParametersFast(payload, timestamp) {
-  const keys = Object.keys(payload).sort();
   let parameters = "";
-  for (const key of keys) {
+  
+  // CRÍTICO: BingX requiere parámetros ordenados alfabéticamente
+  const sortedKeys = Object.keys(payload).sort();
+  
+  for (const key of sortedKeys) {
     if (payload[key] !== undefined && payload[key] !== null) {
       parameters += `${key}=${payload[key]}&`;
+    }
+  }
+  parameters += `timestamp=${timestamp}`;
+  return parameters;
+}
+
+// 🔧 FUNCIÓN PARA URL ENCODING (necesaria para algunos endpoints)
+function getParametersUrlEncoded(payload, timestamp) {
+  let parameters = "";
+  
+  const sortedKeys = Object.keys(payload).sort();
+  
+  for (const key of sortedKeys) {
+    if (payload[key] !== undefined && payload[key] !== null) {
+      parameters += `${key}=${encodeURIComponent(payload[key])}&`;
     }
   }
   parameters += `timestamp=${timestamp}`;
@@ -109,19 +127,25 @@ async function getContractInfo(symbol) {
   return { minOrderQty: 0.001, tickSize: 0.01, stepSize: 0.001, minNotional: 1 };
 }
 
-// ⚡ LEVERAGE ULTRA-RÁPIDO (saltear si no es necesario)
+// ⚡ LEVERAGE ULTRA-RÁPIDO (con firma corregida)
 async function setLeverage(symbol, leverage = 5) {
   if (!API_KEY || !API_SECRET) throw new Error('API key/secret no configurados');
 
   try {
     const timestamp = Date.now();
     const payload = { symbol, side: "LONG", leverage };
+    
+    // Usar parámetros sin encoding para firma
     const parameters = getParametersFast(payload, timestamp);
     const signature = crypto.createHmac('sha256', API_SECRET).update(parameters).digest('hex');
     
-    const response = await fastAxios.post(`https://${HOST}/openApi/swap/v2/trade/leverage`, null, {
-      params: { ...payload, timestamp, signature },
-      headers: { 'X-BX-APIKEY': API_KEY }
+    // Usar parámetros con encoding para URL
+    const parametersUrlEncoded = getParametersUrlEncoded(payload, timestamp);
+    const url = `https://${HOST}/openApi/swap/v2/trade/leverage?${parametersUrlEncoded}&signature=${signature}`;
+    
+    const response = await fastAxios.post(url, null, {
+      headers: { 'X-BX-APIKEY': API_KEY },
+      transformResponse: (resp) => resp
     });
     
     const data = typeof response.data === 'string' ? JSON.parse(response.data) : response.data;
@@ -132,7 +156,7 @@ async function setLeverage(symbol, leverage = 5) {
   }
 }
 
-// 🚀 FUNCIÓN PRINCIPAL ULTRA-OPTIMIZADA
+// 🚀 FUNCIÓN PRINCIPAL ULTRA-OPTIMIZADA (CON FIRMA CORREGIDA)
 async function placeOrderInternal({ symbol, side, leverage = 5, usdtAmount = 1 }) {
   const startTime = Date.now();
   
@@ -176,14 +200,16 @@ async function placeOrderInternal({ symbol, side, leverage = 5, usdtAmount = 1 }
 
     console.log('📋 Payload orden:', payload);
 
-    // 5. Firma ultra-rápida
+    // 5. Firma corregida
     const parameters = getParametersFast(payload, timestamp);
+    const parametersUrlEncoded = getParametersUrlEncoded(payload, timestamp);
     const signature = crypto.createHmac('sha256', API_SECRET).update(parameters).digest('hex');
+    const url = `https://${HOST}/openApi/swap/v2/trade/order?${parametersUrlEncoded}&signature=${signature}`;
 
     // 6. Request directo
-    const response = await fastAxios.post(`https://${HOST}/openApi/swap/v2/trade/order`, null, {
-      params: { ...payload, timestamp, signature },
-      headers: { 'X-BX-APIKEY': API_KEY }
+    const response = await fastAxios.post(url, null, {
+      headers: { 'X-BX-APIKEY': API_KEY },
+      transformResponse: (resp) => resp
     });
 
     const latency = Date.now() - startTime;
@@ -297,7 +323,7 @@ async function placeOrder(params) {
   return await placeOrderWithSmartRetry(params);
 }
 
-// ⚡ BALANCE ULTRA-RÁPIDO
+// ⚡ BALANCE ULTRA-RÁPIDO (CON FIRMA CORREGIDA)
 async function getUSDTBalance() {
   if (!API_KEY || !API_SECRET) throw new Error('API key/secret no configurados');
 
@@ -305,10 +331,11 @@ async function getUSDTBalance() {
     const timestamp = Date.now();
     const parameters = `timestamp=${timestamp}`;
     const signature = crypto.createHmac('sha256', API_SECRET).update(parameters).digest('hex');
+    const url = `https://${HOST}/openApi/swap/v2/user/balance?${parameters}&signature=${signature}`;
     
-    const response = await fastAxios.get(`https://${HOST}/openApi/swap/v2/user/balance`, {
-      params: { timestamp, signature },
-      headers: { 'X-BX-APIKEY': API_KEY }
+    const response = await fastAxios.get(url, {
+      headers: { 'X-BX-APIKEY': API_KEY },
+      transformResponse: (resp) => resp
     });
 
     console.log('🔍 Balance response type:', typeof response.data);
@@ -337,7 +364,7 @@ async function getUSDTBalance() {
   }
 }
 
-// ⚡ CLOSE POSITION ULTRA-RÁPIDO
+// ⚡ CLOSE POSITION ULTRA-RÁPIDO (CON FIRMA CORREGIDA)
 async function closePosition(symbol, side = 'BOTH') {
   const startTime = Date.now();
   
@@ -347,12 +374,16 @@ async function closePosition(symbol, side = 'BOTH') {
     const timestamp = Date.now();
     const normalizedSymbol = normalizeSymbol(symbol);
     const payload = { symbol: normalizedSymbol, side: side, type: 'MARKET' };
+    
+    // Usar firma corregida
     const parameters = getParametersFast(payload, timestamp);
+    const parametersUrlEncoded = getParametersUrlEncoded(payload, timestamp);
     const signature = crypto.createHmac('sha256', API_SECRET).update(parameters).digest('hex');
+    const url = `https://${HOST}/openApi/swap/v2/trade/closeAllPositions?${parametersUrlEncoded}&signature=${signature}`;
 
-    const response = await fastAxios.post(`https://${HOST}/openApi/swap/v2/trade/closeAllPositions`, null, {
-      params: { ...payload, timestamp, signature },
-      headers: { 'X-BX-APIKEY': API_KEY }
+    const response = await fastAxios.post(url, null, {
+      headers: { 'X-BX-APIKEY': API_KEY },
+      transformResponse: (resp) => resp
     });
 
     const latency = Date.now() - startTime;
