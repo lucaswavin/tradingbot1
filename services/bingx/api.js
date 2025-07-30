@@ -210,18 +210,6 @@ async function setLeverage(symbol, leverage = 5) {
   }
 }
 
-// Función para obtener el mínimo real desde el error de BingX
-function extractMinimumFromError(errorMessage) {
-  // Buscar patrón: "minimum size for opening an order is X USDT"
-  const match = errorMessage.match(/minimum size for opening an order is ([\d.]+) USDT/i);
-  if (match) {
-    const minimum = parseFloat(match[1]);
-    console.log(`📏 Mínimo extraído del error: ${minimum} USDT`);
-    return minimum;
-  }
-  return null;
-}
-
 // Función mejorada para usar el mínimo inteligente
 async function placeOrderWithMinimumCheck({ symbol, side, leverage = 5, desiredUsdtAmount = 1 }) {
   console.log('\n🚀 ===== INICIANDO ORDEN CON CHECK MÍNIMO =====');
@@ -262,24 +250,24 @@ async function placeOrderWithMinimumCheck({ symbol, side, leverage = 5, desiredU
     throw error;
   }
 }
-  console.log('\n🚀 ===== INICIANDO ORDEN =====');
+
+// Función interna para ejecutar la orden
+async function placeOrderInternal({ symbol, side, leverage = 5, usdtAmount = 1 }) {
+  console.log('\n🚀 ===== EJECUTANDO ORDEN INTERNA =====');
   console.log(`📊 Parámetros recibidos:`, { symbol, side, leverage, usdtAmount });
   
   if (!API_KEY || !API_SECRET) {
     throw new Error('BingX API keys no configuradas');
   }
 
-  const normalizedSymbol = normalizeSymbol(symbol);
-  console.log(`🎯 Procesando orden: ${side.toUpperCase()} ${normalizedSymbol}`);
-
   try {
     // 1. Establecer leverage (opcional)
     console.log('\n--- PASO 1: Establecer Leverage ---');
-    await setLeverage(normalizedSymbol, leverage);
+    await setLeverage(symbol, leverage);
 
-    // 2. Calcular quantity CON LEVERAGE CORRECTO
+    // 2. Calcular quantity
     console.log('\n--- PASO 2: Calcular Quantity ---');
-    const quantity = await calculateQuantity(normalizedSymbol, usdtAmount, leverage);
+    const quantity = await calculateQuantity(symbol, usdtAmount, leverage);
 
     // 3. Preparar payload EXACTO según código oficial BingX
     console.log('\n--- PASO 3: Preparar Payload Oficial ---');
@@ -288,7 +276,7 @@ async function placeOrderWithMinimumCheck({ symbol, side, leverage = 5, desiredU
     
     // PAYLOAD EXACTO según ejemplo oficial de BingX
     const payload = {
-      symbol: normalizedSymbol,
+      symbol: symbol,
       side: orderSide,
       positionSide: orderSide === 'BUY' ? 'LONG' : 'SHORT',
       type: 'MARKET',
@@ -328,8 +316,6 @@ async function placeOrderWithMinimumCheck({ symbol, side, leverage = 5, desiredU
       }
     };
 
-    console.log('⚙️ Config de request:', JSON.stringify(config, null, 2));
-
     const response = await axios(config);
 
     console.log('\n✅ ===== RESPUESTA RECIBIDA =====');
@@ -348,7 +334,6 @@ async function placeOrderWithMinimumCheck({ symbol, side, leverage = 5, desiredU
     
     if (error.response) {
       console.error('📊 Status HTTP:', error.response.status);
-      console.error('📄 Headers:', error.response.headers);
       console.error('📄 Data raw:', error.response.data);
       
       try {
@@ -378,7 +363,7 @@ async function placeOrderWithMinimumCheck({ symbol, side, leverage = 5, desiredU
   }
 }
 
-// Función principal que ahora usa check mínimo inteligente
+// Función principal que usa check mínimo inteligente
 async function placeOrder(params) {
   return await placeOrderWithMinimumCheck(params);
 }
