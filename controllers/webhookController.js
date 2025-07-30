@@ -283,3 +283,36 @@ exports.getStatus = (req, res) => {
   });
 };
 
+// Nueva función para métricas de rendimiento
+exports.getMetrics = (req, res) => {
+  const signals = global.botState?.signals || [];
+  const lastSignals = signals.slice(-10);
+  
+  // Calcular métricas básicas
+  const successfulTrades = signals.filter(s => s.orderSuccess === true).length;
+  const failedTrades = signals.filter(s => s.tradingExecuted === true && s.orderSuccess !== true).length;
+  const totalTrades = signals.filter(s => s.tradingExecuted === true).length;
+  
+  const metrics = {
+    totalSignals: signals.length,
+    totalTrades: totalTrades,
+    successfulTrades: successfulTrades,
+    failedTrades: failedTrades,
+    successRate: totalTrades > 0 ? ((successfulTrades / totalTrades) * 100).toFixed(1) : 0,
+    lastSignalTime: signals.length > 0 ? signals[signals.length - 1].timestamp : 'Nunca',
+    serverUptime: `${Math.floor(process.uptime() / 60)} minutos`,
+    memoryUsage: {
+      used: `${Math.round(process.memoryUsage().heapUsed / 1024 / 1024)} MB`,
+      total: `${Math.round(process.memoryUsage().heapTotal / 1024 / 1024)} MB`
+    },
+    apiConfigured: !!(process.env.BINGX_API_KEY && process.env.BINGX_API_SECRET),
+    webhookSecretConfigured: !!process.env.WEBHOOK_SECRET
+  };
+  
+  res.json({
+    ok: true,
+    metrics: metrics,
+    recentSignals: lastSignals,
+    timestamp: new Date().toISOString()
+  });
+};
