@@ -132,7 +132,7 @@ async function setLeverage(symbol, leverage = 5) {
   }
 }
 
-// 🛒 FUNCIÓN CORREGIDA - Colocar orden interna (POST BODY)
+// 🛒 FUNCIÓN FINAL CORREGIDA - Colocar orden (QUERY PARAMS como leverage)
 async function placeOrderInternal({ symbol, side, leverage = 5, usdtAmount = 1 }) {
   if (!API_KEY || !API_SECRET) throw new Error('API key/secret no configurados');
 
@@ -157,7 +157,7 @@ async function placeOrderInternal({ symbol, side, leverage = 5, usdtAmount = 1 }
     const timestamp = Date.now();
     const orderSide = side.toUpperCase();
     
-    // ✅ PAYLOAD SIN TIMESTAMP (se agrega después)
+    // ✅ PAYLOAD PARA QUERY PARAMS (igual que leverage)
     const payload = {
       symbol,
       side: orderSide,
@@ -170,22 +170,16 @@ async function placeOrderInternal({ symbol, side, leverage = 5, usdtAmount = 1 }
 
     console.log('📋 Payload orden:', payload);
 
-    // ✅ CREAR PARÁMETROS PARA FIRMA (con timestamp)
-    const paramsForSig = getParametersOfficial(payload, timestamp, false);
-    const signature = crypto.createHmac('sha256', API_SECRET).update(paramsForSig).digest('hex');
-    
-    // ✅ PAYLOAD FINAL CON TIMESTAMP Y FIRMA
-    const signedPayload = { 
-      ...payload, 
-      timestamp, 
-      signature 
-    };
+    // ✅ USAR QUERY PARAMS (como leverage funciona)
+    const params = getParametersOfficial(payload, timestamp, false);
+    const parametersUrlEncoded = getParametersOfficial(payload, timestamp, true);
+    const signature = crypto.createHmac('sha256', API_SECRET).update(params).digest('hex');
+    const url = `https://${HOST}/openApi/swap/v2/trade/order?${parametersUrlEncoded}&signature=${signature}`;
 
-    console.log('🔧 Debug parameters:', paramsForSig);
+    console.log('🔧 Debug parameters:', params);
     console.log('🔧 Debug signature:', signature);
 
-    const url = `https://${HOST}/openApi/swap/v2/trade/order`;
-    const res = await fastAxios.post(url, signedPayload, { 
+    const res = await fastAxios.post(url, null, { 
       headers: { 'X-BX-APIKEY': API_KEY },
       transformResponse: (resp) => resp
     });
@@ -324,7 +318,7 @@ async function getUSDTBalance() {
   }
 }
 
-// 🛑 FUNCIÓN CORREGIDA - Cerrar todas posiciones (POST BODY)
+// 🛑 Cerrar todas posiciones (QUERY PARAMS como leverage)
 async function closeAllPositions(symbol) {
   const startTime = Date.now();
   
@@ -334,28 +328,22 @@ async function closeAllPositions(symbol) {
     const timestamp = Date.now();
     const normalizedSymbol = normalizeSymbol(symbol);
     
-    // ✅ PAYLOAD SIN TIMESTAMP
+    // ✅ PAYLOAD PARA QUERY PARAMS
     const payload = {
       symbol: normalizedSymbol,
       side: 'BOTH',
       type: 'MARKET'
     };
     
-    // ✅ CREAR PARÁMETROS PARA FIRMA
+    // ✅ USAR QUERY PARAMS (como leverage)
     const params = getParametersOfficial(payload, timestamp, false);
+    const parametersUrlEncoded = getParametersOfficial(payload, timestamp, true);
     const signature = crypto.createHmac('sha256', API_SECRET).update(params).digest('hex');
-    
-    // ✅ PAYLOAD FINAL CON TIMESTAMP Y FIRMA
-    const signedPayload = { 
-      ...payload, 
-      timestamp, 
-      signature 
-    };
+    const url = `https://${HOST}/openApi/swap/v2/trade/closeAllPositions?${parametersUrlEncoded}&signature=${signature}`;
     
     console.log('🔧 Debug close parameters:', params);
     
-    const url = `https://${HOST}/openApi/swap/v2/trade/closeAllPositions`;
-    const res = await fastAxios.post(url, signedPayload, { 
+    const res = await fastAxios.post(url, null, { 
       headers: { 'X-BX-APIKEY': API_KEY },
       transformResponse: (resp) => resp
     });
