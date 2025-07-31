@@ -106,6 +106,8 @@ async function getContractInfo(symbol) {
 
 // Envía orden interna
 async function placeOrderInternal({ symbol, side, leverage, usdtAmount }) {
+  console.log(`🚀 placeOrderInternal => symbol: ${symbol}, side: ${side}, leverage: ${leverage}, usdtAmount: ${usdtAmount}`);
+  if (!API_KEY || !API_SECRET) throw new Error('API key/secret no configurados'); symbol, side, leverage, usdtAmount }) {
   if (!API_KEY || !API_SECRET) throw new Error('API key/secret no configurados');
 
   // 1) Leverage
@@ -219,6 +221,7 @@ module.exports = {
   getContractInfo,
   closeAllPositions
 };
+
 
 
 
