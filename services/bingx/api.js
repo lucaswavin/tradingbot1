@@ -166,7 +166,6 @@ async function placeOrderInternal({
 
   // Trailing stop (BingX requiere parámetro adicional, consultar docs)
   if (trailingPercent) {
-    // Trailing stop market (ejemplo)
     payload.trailingStop = {
       type: "TRAILING_STOP_MARKET",
       callbackRate: Number(trailingPercent),
@@ -277,6 +276,5 @@ module.exports = {
   getContractInfo,
   closeAllPositions
 };
-
 
 
