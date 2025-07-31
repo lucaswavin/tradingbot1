@@ -29,7 +29,7 @@ console.log('🔑 BingX API Keys configuradas:', {
   secret: API_SECRET ? `${API_SECRET.substring(0, 8)}...` : 'NO CONFIGURADA'
 });
 
-// Normaliza símbolos (BTCUSDT.P -> BTC-USDT)
+// Normaliza símbolos (BTCUSDT -> BTC-USDT)
 function normalizeSymbol(symbol) {
   if (!symbol) return symbol;
   let base = symbol.replace(/\.P$/, '');
@@ -53,14 +53,14 @@ function buildParams(payload, timestamp, urlEncode = false) {
 // Firma la query
 function signParams(rawParams) {
   return crypto.createHmac('sha256', API_SECRET)
-    .update(rawParams)
-    .digest('hex');
+               .update(rawParams)
+               .digest('hex');
 }
 
 // Establece leverage (GET, firmado)
-async function setLeverage(symbol, leverage = 5, positionSide = 'LONG') {
+async function setLeverage(symbol, leverage = 5) {
   if (!API_KEY || !API_SECRET) throw new Error('API key/secret no configurados');
-  const payload = { symbol, side: positionSide, leverage };
+  const payload = { symbol, side: 'LONG', leverage };
   const ts = Date.now();
   const raw = buildParams(payload, ts, false);
   const sig = signParams(raw);
@@ -91,108 +91,88 @@ async function getContractInfo(symbol) {
       if (c) {
         return {
           minOrderQty: parseFloat(c.minOrderQty || '0.001'),
-          tickSize: parseFloat(c.tickSize || '0.01'),
-          stepSize: parseFloat(c.stepSize || '0.001'),
+          tickSize:    parseFloat(c.tickSize    || '0.01'),
+          stepSize:    parseFloat(c.stepSize    || '0.001'),
           minNotional: parseFloat(c.minNotional || '1')
         };
       }
     }
   } catch {}
-  return { minOrderQty: 0.001, tickSize: 0.01, stepSize: 0.001, minNotional: 1 };
+  return { minOrderQty:0.001, tickSize:0.01, stepSize:0.001, minNotional:1 };
 }
 
-// Calcula TP/SL por % si hace falta
-function buildTPSL(price, tpPercent, slPercent, side = 'BUY') {
-  const tpDec = (tpPercent || 0) / 100;
-  const slDec = (slPercent || 0) / 100;
+// -------- ORDEN PRINCIPAL --------
+async function placeOrderInternal({
+  symbol, side, leverage, usdtAmount,
+  tpPercent, slPercent, trailingPercent
+}) {
+  symbol = normalizeSymbol(symbol);
 
-  let tp, sl;
-  if (side.toUpperCase() === 'BUY') {
-    tp = price * (1 + tpDec);
-    sl = price * (1 - slDec);
-  } else {
-    tp = price * (1 - tpDec);
-    sl = price * (1 + slDec);
-  }
-
-  const tpObj = tpPercent ? {
-    type: "TAKE_PROFIT_MARKET",
-    stopPrice: parseFloat(tp.toFixed(6)),
-    price: parseFloat(tp.toFixed(6)),
-    workingType: "MARK_PRICE"
-  } : undefined;
-
-  const slObj = slPercent ? {
-    type: "STOP_MARKET",
-    stopPrice: parseFloat(sl.toFixed(6)),
-    price: parseFloat(sl.toFixed(6)),
-    workingType: "MARK_PRICE"
-  } : undefined;
-
-  return { takeProfit: tpObj, stopLoss: slObj };
-}
-
-// ORDEN ULTRA FLEXIBLE
-async function placeOrderInternal(params) {
-  const {
-    symbol,
-    side,
-    leverage = 5,
-    usdtAmount = 1,
-    tpPercent,
-    slPercent,
-    takeProfit,
-    stopLoss,
-    trailing,
-    quantity,
-    positionSide,
-    reduceOnly,
-    closeOnTrigger
-  } = params;
-
-  console.log(`🚀 placeOrderInternal =>`, params);
-
+  console.log(`🚀 placeOrderInternal =>`, {
+    symbol, side, leverage, usdtAmount, tpPercent, slPercent, trailingPercent
+  });
   if (!API_KEY || !API_SECRET) throw new Error('API key/secret no configurados');
 
-  // 1) Establece leverage (acepta param positionSide)
-  await setLeverage(symbol, leverage, positionSide || (side && side.toUpperCase() === 'BUY' ? 'LONG' : 'SHORT'));
+  // 1) Establece leverage
+  await setLeverage(symbol, leverage);
 
-  // 2) Precio y cantidad (si no envías quantity, lo calcula)
+  // 2) Precio y cantidad
   const price = await getCurrentPrice(symbol);
-  const realQty = quantity !== undefined
-    ? parseFloat(quantity)
-    : Math.max(0.001, Math.round((usdtAmount * leverage / price) * 1000) / 1000);
+  const quantity = Math.max(0.001, Math.round((usdtAmount * leverage / price) * 1000) / 1000);
 
-  // 3) Calcula TP/SL por percent si hace falta
-  const { takeProfit: tpCalc, stopLoss: slCalc } = buildTPSL(price, tpPercent, slPercent, side);
+  // 3) Calcula TP/SL en precio si hay porcentaje
+  let takeProfitJson = undefined, stopLossJson = undefined;
 
-  // 4) Payload ultra flexible
+  if (tpPercent) {
+    let tpPrice = side.toUpperCase() === 'BUY'
+      ? +(price * (1 + tpPercent / 100)).toFixed(6)
+      : +(price * (1 - tpPercent / 100)).toFixed(6);
+
+    takeProfitJson = JSON.stringify({
+      type: "TAKE_PROFIT_MARKET",
+      stopPrice: tpPrice,
+      price: tpPrice,
+      workingType: "MARK_PRICE"
+    });
+  }
+
+  if (slPercent) {
+    let slPrice = side.toUpperCase() === 'BUY'
+      ? +(price * (1 - slPercent / 100)).toFixed(6)
+      : +(price * (1 + slPercent / 100)).toFixed(6);
+
+    stopLossJson = JSON.stringify({
+      type: "STOP_MARKET",
+      stopPrice: slPrice,
+      price: slPrice,
+      workingType: "MARK_PRICE"
+    });
+  }
+
+  // -------- Payload final --------
   const payload = {
     symbol,
     side: side.toUpperCase(),
-    positionSide: (positionSide || (side && side.toUpperCase() === 'BUY' ? 'LONG' : 'SHORT')),
+    positionSide: side.toUpperCase() === 'BUY' ? 'LONG' : 'SHORT',
     type: 'MARKET',
-    quantity: realQty
+    quantity
   };
-  if (takeProfit || tpCalc)   payload.takeProfit   = JSON.stringify(takeProfit || tpCalc);
-  if (stopLoss   || slCalc)   payload.stopLoss     = JSON.stringify(stopLoss   || slCalc);
-  if (trailing)               payload.trailingStop = JSON.stringify({
-    type: "TRAILING_STOP_MARKET",
-    callbackRate: trailing.callbackRate || 0.8,
-    ...(trailing.activationPrice ? { activationPrice: trailing.activationPrice } : {}),
-    workingType: "MARK_PRICE"
-  });
-  if (reduceOnly !== undefined)     payload.reduceOnly = reduceOnly;
-  if (closeOnTrigger !== undefined) payload.closeOnTrigger = closeOnTrigger;
 
-  // 5) Firma y query
+  if (takeProfitJson) payload.takeProfit = takeProfitJson;
+  if (stopLossJson)   payload.stopLoss   = stopLossJson;
+
+  // TODO: trailing, OCO etc. (de momento solo log)
+  if (trailingPercent) {
+    console.log('⚡ Trailing todavía no implementado (solo log, prepáralo aparte)');
+  }
+
+  // -------- Firma y POST --------
   const ts = Date.now();
   const raw = buildParams(payload, ts, false);
   const sig = signParams(raw);
   const qp = buildParams(payload, ts, true) + `&signature=${sig}`;
   const url = `https://${HOST}/openApi/swap/v2/trade/order?${qp}`;
 
-  // 6) POST con body null
   try {
     console.log('📋 Orden (payload/query):', payload);
     console.log('🔗 URL:', url);
@@ -209,10 +189,14 @@ async function placeOrderInternal(params) {
 
 // Retry mínimo inteligente
 async function placeOrderWithSmartRetry(params) {
-  const sym = normalizeSymbol(params.symbol);
-  const baseParams = { ...params, symbol: sym };
-
-  let result = await placeOrderInternal(baseParams);
+  const {
+    symbol, side, leverage = 5,
+    tpPercent, slPercent, trailingPercent
+  } = params;
+  const sym = normalizeSymbol(symbol);
+  let result = await placeOrderInternal({
+    symbol: sym, side, leverage, usdtAmount: 1, tpPercent, slPercent, trailingPercent
+  });
   if (result.code === 0) return result;
 
   const msg = result.msg || result.message || '';
@@ -228,7 +212,10 @@ async function placeOrderWithSmartRetry(params) {
       minUSDT = info.minNotional;
     }
     const retryAmt = Math.ceil(minUSDT * 1.1 * 100) / 100;
-    result = await placeOrderInternal({ ...baseParams, usdtAmount: retryAmt });
+    result = await placeOrderInternal({
+      symbol: sym, side, leverage, usdtAmount: retryAmt,
+      tpPercent, slPercent, trailingPercent
+    });
   }
   return result;
 }
@@ -283,6 +270,7 @@ module.exports = {
   getContractInfo,
   closeAllPositions
 };
+
 
 
 
