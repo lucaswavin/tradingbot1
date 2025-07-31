@@ -110,12 +110,14 @@ async function placeOrderInternal({ symbol, side, leverage, usdtAmount }) {
 
   // 1) Leverage
   await setLeverage(symbol, leverage);
+
   // 2) Precio y cantidad
   const price = await getCurrentPrice(symbol);
   const quantity = Math.max(
     0.001,
     Math.round((usdtAmount * leverage / price) * 1000) / 1000
   );
+
   // 3) Payload orden
   const payload = {
     symbol,
@@ -124,16 +126,19 @@ async function placeOrderInternal({ symbol, side, leverage, usdtAmount }) {
     type: 'MARKET',
     quantity
   };
+
   // 4) Firma query
   const ts = Date.now();
   const raw = buildParams(payload, ts, false);
   const sig = signParams(raw);
   const qp = `timestamp=${ts}&signature=${sig}`;
+
   // 5) URL orden
   const url = `https://${HOST}/openApi/swap/v2/trade/order?${qp}`;
-  // 6) POST orden
+
+  // 6) POST orden (payload en query, body null)
   try {
-    const res = await fastAxios.post(url, payload, {
+    const res = await fastAxios.post(url, null, {
       headers: { 'X-BX-APIKEY': API_KEY }
     });
     return res.data;
@@ -148,6 +153,7 @@ async function placeOrderWithSmartRetry({ symbol, side, leverage = 5 }) {
   const sym = normalizeSymbol(symbol);
   let result = await placeOrderInternal({ symbol: sym, side, leverage, usdtAmount: 1 });
   if (result.code === 0) return result;
+
   const msg = result.msg || result.message || '';
   if (/min|min notional|insufficient/.test(msg.toLowerCase())) {
     let minUSDT;
@@ -163,6 +169,7 @@ async function placeOrderWithSmartRetry({ symbol, side, leverage = 5 }) {
     const retryAmt = Math.ceil(minUSDT * 1.1 * 100) / 100;
     result = await placeOrderInternal({ symbol: sym, side, leverage, usdtAmount: retryAmt });
   }
+
   return result;
 }
 
@@ -199,7 +206,7 @@ async function closeAllPositions(symbol) {
   const sig = signParams(raw);
   const qp = buildParams(payload, ts, true) + `&signature=${sig}`;
   const url = `https://${HOST}/openApi/swap/v2/trade/closeAllPositions?${qp}`;
-  const res = await fastAxios.post(url, payload, { headers: { 'X-BX-APIKEY': API_KEY } });
+  const res = await fastAxios.post(url, null, { headers: { 'X-BX-APIKEY': API_KEY } });
   return res.data;
 }
 
