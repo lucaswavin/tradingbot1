@@ -6,7 +6,7 @@ const API_KEY = process.env.BINGX_API_KEY;
 const API_SECRET = process.env.BINGX_API_SECRET;
 const HOST = 'open-api.bingx.com';
 
-// 🔧 Conexión HTTP optimizada
+// 🔧 Pool HTTP rápido
 const ultraFastAgent = new https.Agent({
   keepAlive: true,
   keepAliveMsecs: 1000,
@@ -62,7 +62,6 @@ function signParams(rawParams) {
 // Establece leverage con GET
 async function setLeverage(symbol, leverage = 5) {
   if (!API_KEY || !API_SECRET) throw new Error('API key/secret no configurados');
-
   const payload = { symbol, side: 'LONG', leverage };
   const ts = Date.now();
   const raw = buildParams(payload, ts, false);
@@ -107,7 +106,6 @@ async function getContractInfo(symbol) {
 // Envía orden interna
 async function placeOrderInternal({ symbol, side, leverage, usdtAmount }) {
   console.log(`🚀 placeOrderInternal => symbol: ${symbol}, side: ${side}, leverage: ${leverage}, usdtAmount: ${usdtAmount}`);
-  if (!API_KEY || !API_SECRET) throw new Error('API key/secret no configurados'); symbol, side, leverage, usdtAmount }) {
   if (!API_KEY || !API_SECRET) throw new Error('API key/secret no configurados');
 
   // 1) Leverage
@@ -138,11 +136,14 @@ async function placeOrderInternal({ symbol, side, leverage, usdtAmount }) {
   // 5) URL orden
   const url = `https://${HOST}/openApi/swap/v2/trade/order?${qp}`;
 
-  // 6) POST orden (payload en query, body null)
+  // 6) POST orden (payload en body JSON)
   try {
-    const res = await fastAxios.post(url, null, {
+    console.log('📋 Orden payload:', payload);
+    console.log('🔗 URL:', url);
+    const res = await fastAxios.post(url, payload, {
       headers: { 'X-BX-APIKEY': API_KEY }
     });
+    console.log('📨 BingX response:', res.data);
     return res.data;
   } catch (err) {
     console.error('❌ Error placeOrderInternal:', err.response?.data || err.message);
@@ -161,7 +162,7 @@ async function placeOrderWithSmartRetry({ symbol, side, leverage = 5 }) {
     let minUSDT;
     const m = msg.match(/([\d.]+)\s+([A-Z]+)/);
     if (m) {
-      const [_, q] = m;
+      const [, q] = m;
       minUSDT = parseFloat(q) * await getCurrentPrice(sym);
     }
     if (!minUSDT) {
@@ -206,10 +207,15 @@ async function closeAllPositions(symbol) {
   const payload = { symbol: sym, side: 'BOTH', type: 'MARKET' };
   const raw = buildParams(payload, ts, false);
   const sig = signParams(raw);
-  const qp = buildParams(payload, ts, true) + `&signature=${sig}`;
+  const qp = `timestamp=${ts}&signature=${sig}`;
   const url = `https://${HOST}/openApi/swap/v2/trade/closeAllPositions?${qp}`;
-  const res = await fastAxios.post(url, null, { headers: { 'X-BX-APIKEY': API_KEY } });
-  return res.data;
+  try {
+    const res = await fastAxios.post(url, payload, { headers: { 'X-BX-APIKEY': API_KEY } });
+    return res.data;
+  } catch (err) {
+    console.error('❌ Error closeAllPositions:', err.response?.data || err.message);
+    throw err;
+  }
 }
 
 module.exports = {
@@ -221,6 +227,7 @@ module.exports = {
   getContractInfo,
   closeAllPositions
 };
+
 
 
 
