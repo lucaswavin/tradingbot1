@@ -44,7 +44,7 @@ function normalizeSymbol(symbol) {
   return base;
 }
 
-// 🔐 FUNCIÓN OFICIAL - Siguiendo exactamente el ejemplo de BingX CON SUPER DEBUG
+// 🔐 FUNCIÓN CORREGIDA - Construir parámetros con manejo de números
 function getParameters(payload, timestamp, urlEncode = false) {
   console.log('🐛 [DEBUG] getParameters entrada:');
   console.log('🐛 [DEBUG] - payload:', JSON.stringify(payload, null, 2));
@@ -63,12 +63,15 @@ function getParameters(payload, timestamp, urlEncode = false) {
       const value = payload[key];
       console.log(`🐛 [DEBUG] - PASO ${stepCounter}: valor = "${value}" (tipo: ${typeof value})`);
       
+      // Convertir números a string para la URL
+      const stringValue = String(value);
+      
       let paramPart = "";
       if (urlEncode) {
-        paramPart = key + "=" + encodeURIComponent(value) + "&";
+        paramPart = key + "=" + encodeURIComponent(stringValue) + "&";
         console.log(`🐛 [DEBUG] - PASO ${stepCounter}: agregando (encoded): "${paramPart}"`);
       } else {
-        paramPart = key + "=" + value + "&";
+        paramPart = key + "=" + stringValue + "&";
         console.log(`🐛 [DEBUG] - PASO ${stepCounter}: agregando (normal): "${paramPart}"`);
       }
       
@@ -80,7 +83,6 @@ function getParameters(payload, timestamp, urlEncode = false) {
   }
   
   console.log('🐛 [DEBUG] - parameters ANTES de timestamp:', parameters);
-  console.log('🐛 [DEBUG] - longitud antes de timestamp:', parameters.length);
   
   // Luego agregar timestamp AL FINAL (como en el ejemplo oficial)
   if (parameters) {
@@ -97,22 +99,6 @@ function getParameters(payload, timestamp, urlEncode = false) {
   }
   
   console.log('🐛 [DEBUG] - parameters FINALES:', parameters);
-  console.log('🐛 [DEBUG] - longitud final:', parameters.length);
-  
-  // 🚨 VALIDACIONES CRÍTICAS
-  if (parameters.includes('undefined')) {
-    console.error('🚨 [ERROR] Parameters contienen "undefined"!');
-  }
-  if (parameters.includes('null')) {
-    console.error('🚨 [ERROR] Parameters contienen "null"!');
-  }
-  if (parameters.includes('&&')) {
-    console.error('🚨 [ERROR] Parameters tienen && doble!');
-  }
-  if (parameters.endsWith('&')) {
-    console.error('🚨 [ERROR] Parameters terminan en &!');
-  }
-  
   return parameters;
 }
 
@@ -165,7 +151,7 @@ async function getContractInfo(symbol) {
   return { minOrderQty: 0.001, tickSize: 0.01, stepSize: 0.001, minNotional: 1 };
 }
 
-// ⚙️ Establecer modo de margen (ISOLATED vs CROSS)
+// ⚙️ Establecer modo de margen ISOLATED
 async function setMarginMode(symbol, marginMode = 'ISOLATED') {
   if (!API_KEY || !API_SECRET) throw new Error('API key/secret no configurados');
   
@@ -213,7 +199,7 @@ async function setMarginMode(symbol, marginMode = 'ISOLATED') {
   }
 }
 
-// ⚙️ Establecer leverage SIGUIENDO EJEMPLO OFICIAL
+// ⚙️ Establecer leverage 5x
 async function setLeverage(symbol, leverage = 5) {
   if (!API_KEY || !API_SECRET) throw new Error('API key/secret no configurados');
   
@@ -223,13 +209,13 @@ async function setLeverage(symbol, leverage = 5) {
     const payload = { 
       symbol, 
       side: 'LONG', 
-      leverage: leverage.toString() 
+      leverage: leverage
     };
     
     console.log('🐛 [DEBUG] setLeverage payload:', JSON.stringify(payload, null, 2));
     
     const signature = createBingXSignature(payload, timestamp);
-    const parametersEncoded = getParameters(payload, timestamp, true); // Con URL encoding para URL
+    const parametersEncoded = getParameters(payload, timestamp, true);
     const url = `https://${HOST}/openApi/swap/v2/trade/leverage?${parametersEncoded}&signature=${signature}`;
     
     console.log('🐛 [DEBUG] setLeverage URL:', url);
@@ -247,6 +233,13 @@ async function setLeverage(symbol, leverage = 5) {
     const res = await fastAxios(config);
     const data = JSON.parse(res.data);
     console.log('🐛 [DEBUG] setLeverage respuesta:', data);
+    
+    if (data.code === 0) {
+      console.log(`✅ Leverage establecido: ${leverage}x para ${symbol}`);
+    } else {
+      console.warn(`⚠️ No se pudo establecer leverage ${leverage}x:`, data.msg);
+    }
+    
     return data;
   } catch (error) {
     console.error('🐛 [DEBUG] setLeverage error:', error.message);
@@ -255,47 +248,60 @@ async function setLeverage(symbol, leverage = 5) {
   }
 }
 
-// 🛒 FUNCIÓN SIGUIENDO EJEMPLO OFICIAL - Colocar orden CON MODO ISOLATED
+// 🛒 FUNCIÓN PRINCIPAL - Colocar orden con ISOLATED + 5x + 1 USDT
 async function placeOrderInternal({ symbol, side, leverage = 5, usdtAmount = 1, marginMode = 'ISOLATED' }) {
   console.log('🐛 [DEBUG] placeOrderInternal iniciado con:', { symbol, side, leverage, usdtAmount, marginMode });
   
   if (!API_KEY || !API_SECRET) throw new Error('API key/secret no configurados');
 
   try {
-    // 1️⃣ Establecer modo de margen PRIMERO
+    // 1️⃣ Establecer modo ISOLATED
+    console.log('🔧 PASO 1: Estableciendo modo ISOLATED...');
     await setMarginMode(symbol, marginMode);
     
-    // 2️⃣ Establecer leverage
+    // 2️⃣ Establecer leverage 5x
+    console.log('🔧 PASO 2: Estableciendo leverage 5x...');
     await setLeverage(symbol, leverage);
 
+    // 3️⃣ Obtener precio actual
+    console.log('🔧 PASO 3: Obteniendo precio actual...');
     const price = await getCurrentPrice(symbol);
     console.log(`💰 Precio actual de ${symbol}: ${price} USDT`);
     
-    const buyingPower = usdtAmount * leverage;
+    // 4️⃣ Calcular cantidad con 1 USDT + 5x leverage
+    console.log('🔧 PASO 4: Calculando cantidad...');
+    const buyingPower = usdtAmount * leverage; // 1 * 5 = 5 USDT de poder de compra
     let quantity = buyingPower / price;
     quantity = Math.round(quantity * 1000) / 1000;
     quantity = Math.max(0.001, quantity);
+    
+    console.log(`🧮 Cálculo: ${usdtAmount} USDT × ${leverage}x = ${buyingPower} USDT de poder`);
+    console.log(`🧮 Cantidad: ${buyingPower} ÷ ${price} = ${quantity}`);
 
+    // 5️⃣ Construir payload según documentación BingX
+    console.log('🔧 PASO 5: Construyendo orden...');
     const timestamp = Date.now();
     const orderSide = side.toUpperCase();
     
-    // ✅ PAYLOAD SIGUIENDO EJEMPLO OFICIAL
+    // ✅ PAYLOAD SEGÚN DOCUMENTACIÓN OFICIAL BingX
     const payload = {
-      symbol,
-      side: orderSide,
-      positionSide: orderSide === 'BUY' ? 'LONG' : 'SHORT',
+      symbol: symbol, // ORDER-USDT (con guión)
       type: 'MARKET',
-      quantity: quantity.toString()
+      side: orderSide, // BUY o SELL
+      quantity: quantity, // COMO NÚMERO (no string)
+      workingType: 'CONTRACT_PRICE' // Requerido según documentación
     };
 
-    console.log('🐛 [DEBUG] placeOrder payload:', JSON.stringify(payload, null, 2));
-    console.log(`🏷️ Configuración: ${marginMode} mode, ${leverage}x leverage, ${usdtAmount} USDT`);
+    console.log('🐛 [DEBUG] placeOrder payload FINAL:', JSON.stringify(payload, null, 2));
+    console.log(`🏷️ Configuración FINAL: ${marginMode} mode, ${leverage}x leverage, ${usdtAmount} USDT`);
 
+    // 6️⃣ Ejecutar orden
+    console.log('🔧 PASO 6: Ejecutando orden...');
     const signature = createBingXSignature(payload, timestamp);
-    const parametersEncoded = getParameters(payload, timestamp, true); // Con URL encoding para URL
+    const parametersEncoded = getParameters(payload, timestamp, true);
     const url = `https://${HOST}/openApi/swap/v2/trade/order?${parametersEncoded}&signature=${signature}`;
 
-    console.log('🐛 [DEBUG] placeOrder URL:', url);
+    console.log('🐛 [DEBUG] placeOrder URL FINAL:', url);
 
     const config = {
       method: 'POST',
@@ -309,7 +315,21 @@ async function placeOrderInternal({ symbol, side, leverage = 5, usdtAmount = 1, 
 
     const res = await fastAxios(config);
     const data = JSON.parse(res.data);
-    console.log('🐛 [DEBUG] placeOrder respuesta:', data);
+    console.log('🐛 [DEBUG] placeOrder respuesta FINAL:', data);
+    
+    if (data.code === 0) {
+      console.log('🎉 ¡ORDEN EJECUTADA EXITOSAMENTE!');
+      console.log(`✅ Símbolo: ${symbol}`);
+      console.log(`✅ Lado: ${orderSide}`);
+      console.log(`✅ Cantidad: ${quantity}`);
+      console.log(`✅ Modo: ${marginMode}`);
+      console.log(`✅ Leverage: ${leverage}x`);
+      console.log(`✅ Inversión: ${usdtAmount} USDT`);
+      if (data.data?.orderId) {
+        console.log(`✅ Order ID: ${data.data.orderId}`);
+      }
+    }
+    
     return data;
   } catch (error) {
     console.error('🐛 [DEBUG] placeOrder error:', error.message);
@@ -323,24 +343,24 @@ async function placeOrderInternal({ symbol, side, leverage = 5, usdtAmount = 1, 
   }
 }
 
-// 🔄 Retry inteligente CON MODO ISOLATED
+// 🔄 Retry inteligente con configuración final
 async function placeOrderWithSmartRetry(params) {
   const { symbol, side, leverage = 5, marginMode = 'ISOLATED' } = params;
   const normalizedSymbol = normalizeSymbol(symbol);
 
-  console.log(`🚀 Intentando orden ISOLATED con 1 USDT para ${normalizedSymbol}...`);
+  console.log(`🚀 Intentando orden ${marginMode} con 1 USDT × ${leverage}x leverage para ${normalizedSymbol}...`);
 
   try {
     const result = await placeOrderInternal({
       symbol: normalizedSymbol,
       side,
       leverage,
-      usdtAmount: 1,
+      usdtAmount: 1, // ← FIJO EN 1 USDT
       marginMode
     });
 
     if (result && result.code === 0) {
-      console.log(`✅ ÉXITO con 1 USDT en modo ${marginMode}`);
+      console.log(`✅ ÉXITO con 1 USDT en modo ${marginMode} × ${leverage}x`);
       return result;
     }
 
@@ -387,7 +407,7 @@ async function placeOrderWithSmartRetry(params) {
       });
       
       if (retryResult && retryResult.code === 0) {
-        console.log(`✅ ÉXITO con ${finalAmount} USDT en modo ${marginMode}`);
+        console.log(`✅ ÉXITO con ${finalAmount} USDT en modo ${marginMode} × ${leverage}x`);
       }
       
       return retryResult;
@@ -402,20 +422,25 @@ async function placeOrderWithSmartRetry(params) {
   }
 }
 
-// 🏷️ Función pública - Ahora por defecto usa ISOLATED
+// 🏷️ Función pública - ISOLATED + 5x + 1 USDT por defecto
 async function placeOrder(params) {
-  // Por defecto usar ISOLATED
-  const paramsWithMarginMode = { marginMode: 'ISOLATED', ...params };
-  return placeOrderWithSmartRetry(paramsWithMarginMode);
+  // CONFIGURACIÓN FIJA FINAL
+  const finalParams = { 
+    marginMode: 'ISOLATED', // ← Modo aislado
+    leverage: 5,            // ← 5x leverage
+    usdtAmount: 1,          // ← 1 USDT por orden
+    ...params 
+  };
+  return placeOrderWithSmartRetry(finalParams);
 }
 
-// 💵 Obtener balance USDT SIGUIENDO EJEMPLO OFICIAL
+// 💵 Obtener balance USDT
 async function getUSDTBalance() {
   if (!API_KEY || !API_SECRET) throw new Error('API key/secret no configurados');
   
   try {
     const timestamp = Date.now();
-    const payload = {}; // Balance no necesita payload adicional
+    const payload = {};
     
     const signature = createBingXSignature(payload, timestamp);
     const parametersEncoded = getParameters(payload, timestamp, true);
@@ -455,7 +480,7 @@ async function getUSDTBalance() {
   }
 }
 
-// 🛑 FUNCIÓN SIGUIENDO EJEMPLO OFICIAL - Cerrar todas posiciones
+// 🛑 FUNCIÓN - Cerrar todas posiciones
 async function closeAllPositions(symbol) {
   const startTime = Date.now();
   console.log('🐛 [DEBUG] closeAllPositions iniciado para símbolo:', symbol);
@@ -466,10 +491,8 @@ async function closeAllPositions(symbol) {
     const timestamp = Date.now();
     const normalizedSymbol = normalizeSymbol(symbol);
     
-    console.log('🐛 [DEBUG] closeAllPositions timestamp:', timestamp);
     console.log('🐛 [DEBUG] closeAllPositions símbolo normalizado:', normalizedSymbol);
     
-    // ✅ PAYLOAD SIGUIENDO EJEMPLO OFICIAL
     const payload = {
       symbol: normalizedSymbol,
       side: 'BOTH',
@@ -479,7 +502,7 @@ async function closeAllPositions(symbol) {
     console.log('🐛 [DEBUG] closeAllPositions payload:', JSON.stringify(payload, null, 2));
     
     const signature = createBingXSignature(payload, timestamp);
-    const parametersEncoded = getParameters(payload, timestamp, true); // Con URL encoding para URL
+    const parametersEncoded = getParameters(payload, timestamp, true);
     const url = `https://${HOST}/openApi/swap/v2/trade/closeAllPositions?${parametersEncoded}&signature=${signature}`;
     
     console.log('🐛 [DEBUG] closeAllPositions URL:', url);
@@ -505,7 +528,6 @@ async function closeAllPositions(symbol) {
   } catch (error) {
     const latency = Date.now() - startTime;
     console.error('🐛 [DEBUG] closeAllPositions error:', error.message);
-    console.error('🐛 [DEBUG] closeAllPositions response:', error.response?.data);
     console.error(`❌ Error close en ${latency}ms:`, error.message);
     
     return {
@@ -526,7 +548,7 @@ module.exports = {
   placeOrder,
   normalizeSymbol,
   setLeverage,
-  setMarginMode, // ← Nueva función para modo Isolated
+  setMarginMode,
   getCurrentPrice,
   closePosition,
   closeAllPositions,
