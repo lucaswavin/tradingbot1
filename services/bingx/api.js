@@ -26,7 +26,7 @@ const fastAxios = axios.create({
   }
 });
 
-// 🔑 Log de configuración de claves (CORREGIDO)
+// 🔑 Log de configuración de claves
 console.log('🔑 BingX API Keys configuradas:', {
   apiKey: API_KEY ? `${API_KEY.substring(0,8)}...` : 'NO CONFIGURADA',
   secret: API_SECRET ? `${API_SECRET.substring(0,8)}...` : 'NO CONFIGURADA'
@@ -44,23 +44,40 @@ function normalizeSymbol(symbol) {
   return base;
 }
 
-// 🔐 FUNCIÓN CORREGIDA - Construir parámetros sin duplicar timestamp
+// 🔐 FUNCIÓN DEBUG - Construir parámetros con ULTRA-LOGGING
 function getParametersOfficial(payload, timestamp, urlEncode = false) {
+  console.log('🐛 [DEBUG] Entrada getParametersOfficial:');
+  console.log('🐛 [DEBUG] - payload original:', JSON.stringify(payload, null, 2));
+  console.log('🐛 [DEBUG] - timestamp:', timestamp);
+  console.log('🐛 [DEBUG] - urlEncode:', urlEncode);
+  
   // Crear copia del payload SIN timestamp para evitar duplicados
   const payloadWithoutTimestamp = { ...payload };
   delete payloadWithoutTimestamp.timestamp;
   
+  console.log('🐛 [DEBUG] - payload sin timestamp:', JSON.stringify(payloadWithoutTimestamp, null, 2));
+  
   const sortedKeys = Object.keys(payloadWithoutTimestamp).sort();
+  console.log('🐛 [DEBUG] - claves ordenadas:', sortedKeys);
+  
   let params = '';
   
   for (const key of sortedKeys) {
     const val = payloadWithoutTimestamp[key];
+    console.log(`🐛 [DEBUG] - procesando ${key}: ${val} (tipo: ${typeof val})`);
+    
     if (val !== undefined && val !== null) {
-      params += urlEncode
+      const paramPart = urlEncode
         ? `${key}=${encodeURIComponent(val)}&`
         : `${key}=${val}&`;
+      console.log(`🐛 [DEBUG] - agregando: ${paramPart}`);
+      params += paramPart;
+    } else {
+      console.log(`🐛 [DEBUG] - saltando ${key} (undefined/null)`);
     }
   }
+  
+  console.log('🐛 [DEBUG] - params antes de timestamp:', params);
   
   // Agregar timestamp AL FINAL una sola vez
   if (params) {
@@ -69,6 +86,7 @@ function getParametersOfficial(payload, timestamp, urlEncode = false) {
     params = `timestamp=${timestamp}`;
   }
   
+  console.log('🐛 [DEBUG] - params finales:', params);
   return params;
 }
 
@@ -108,32 +126,42 @@ async function getContractInfo(symbol) {
   return { minOrderQty: 0.001, tickSize: 0.01, stepSize: 0.001, minNotional: 1 };
 }
 
-// ⚙️ Establecer leverage (QUERY PARAMS)
+// ⚙️ Establecer leverage (QUERY PARAMS) - CON DEBUG
 async function setLeverage(symbol, leverage = 5) {
   if (!API_KEY || !API_SECRET) throw new Error('API key/secret no configurados');
   
   try {
+    console.log('🐛 [DEBUG] setLeverage iniciado');
     const timestamp = Date.now();
     const payload = { symbol, side: 'LONG', leverage };
+    
+    console.log('🐛 [DEBUG] setLeverage payload:', JSON.stringify(payload, null, 2));
+    
     const params = getParametersOfficial(payload, timestamp, false);
     const parametersUrlEncoded = getParametersOfficial(payload, timestamp, true);
     const signature = crypto.createHmac('sha256', API_SECRET).update(params).digest('hex');
     const url = `https://${HOST}/openApi/swap/v2/trade/leverage?${parametersUrlEncoded}&signature=${signature}`;
+    
+    console.log('🐛 [DEBUG] setLeverage URL completa:', url);
     
     const res = await fastAxios.post(url, null, { 
       headers: { 'X-BX-APIKEY': API_KEY },
       transformResponse: (resp) => resp
     });
     
+    console.log('🐛 [DEBUG] setLeverage respuesta:', res.data);
     return JSON.parse(res.data);
   } catch (error) {
+    console.error('🐛 [DEBUG] setLeverage error:', error.message);
     console.warn('⚠️ Error al establecer leverage:', error.message);
     return null;
   }
 }
 
-// 🛒 FUNCIÓN FINAL CORREGIDA - Colocar orden (QUERY PARAMS como leverage)
+// 🛒 FUNCIÓN ULTRA-DEBUG - Colocar orden
 async function placeOrderInternal({ symbol, side, leverage = 5, usdtAmount = 1 }) {
+  console.log('🐛 [DEBUG] placeOrderInternal iniciado con:', { symbol, side, leverage, usdtAmount });
+  
   if (!API_KEY || !API_SECRET) throw new Error('API key/secret no configurados');
 
   try {
@@ -141,23 +169,16 @@ async function placeOrderInternal({ symbol, side, leverage = 5, usdtAmount = 1 }
 
     const price = await getCurrentPrice(symbol);
     console.log(`💰 Precio actual de ${symbol}: ${price} USDT`);
-    console.log(`💳 Margin deseado: ${usdtAmount} USDT`);
-    console.log(`⚡ Leverage: ${leverage}x`);
     
     const buyingPower = usdtAmount * leverage;
-    console.log(`🚀 Poder de compra: ${usdtAmount} USDT × ${leverage}x = ${buyingPower} USDT`);
-    
     let quantity = buyingPower / price;
     quantity = Math.round(quantity * 1000) / 1000;
     quantity = Math.max(0.001, quantity);
-    
-    console.log(`🧮 Quantity calculada: ${quantity} (${buyingPower} USDT ÷ ${price})`);
-    console.log(`📊 Margin estimado a usar: ~${(quantity * price) / leverage} USDT`);
 
     const timestamp = Date.now();
     const orderSide = side.toUpperCase();
     
-    // ✅ PAYLOAD PARA QUERY PARAMS (igual que leverage)
+    // ✅ PAYLOAD PARA QUERY PARAMS
     const payload = {
       symbol,
       side: orderSide,
@@ -168,24 +189,49 @@ async function placeOrderInternal({ symbol, side, leverage = 5, usdtAmount = 1 }
       priceProtect: 'false'
     };
 
-    console.log('📋 Payload orden:', payload);
+    console.log('🐛 [DEBUG] placeOrder payload completo:', JSON.stringify(payload, null, 2));
+    console.log('🐛 [DEBUG] placeOrder timestamp:', timestamp);
 
-    // ✅ USAR QUERY PARAMS (como leverage funciona)
+    // ✅ CREAR PARÁMETROS CON DEBUG
     const params = getParametersOfficial(payload, timestamp, false);
     const parametersUrlEncoded = getParametersOfficial(payload, timestamp, true);
     const signature = crypto.createHmac('sha256', API_SECRET).update(params).digest('hex');
     const url = `https://${HOST}/openApi/swap/v2/trade/order?${parametersUrlEncoded}&signature=${signature}`;
 
-    console.log('🔧 Debug parameters:', params);
-    console.log('🔧 Debug signature:', signature);
+    console.log('🐛 [DEBUG] placeOrder URL completa:', url);
+    console.log('🐛 [DEBUG] placeOrder headers:', { 'X-BX-APIKEY': `${API_KEY.substring(0,8)}...` });
 
-    const res = await fastAxios.post(url, null, { 
+    // ✅ REQUEST CON DEBUG ULTRA-DETALLADO
+    console.log('🐛 [DEBUG] Enviando request...');
+    const requestConfig = {
+      method: 'POST',
+      url: url,
       headers: { 'X-BX-APIKEY': API_KEY },
-      transformResponse: (resp) => resp
+      transformResponse: (resp) => {
+        console.log('🐛 [DEBUG] Respuesta cruda de BingX:', resp);
+        return resp;
+      }
+    };
+    
+    console.log('🐛 [DEBUG] Config del request:', {
+      method: requestConfig.method,
+      url: requestConfig.url,
+      headers: { 'X-BX-APIKEY': `${API_KEY.substring(0,8)}...` }
     });
+
+    const res = await fastAxios(requestConfig);
+    
+    console.log('🐛 [DEBUG] Status code:', res.status);
+    console.log('🐛 [DEBUG] Headers respuesta:', res.headers);
+    console.log('🐛 [DEBUG] Data type:', typeof res.data);
+    console.log('🐛 [DEBUG] Data content:', res.data);
     
     return JSON.parse(res.data);
   } catch (error) {
+    console.error('🐛 [DEBUG] placeOrder error completo:', error);
+    console.error('🐛 [DEBUG] placeOrder error message:', error.message);
+    console.error('🐛 [DEBUG] placeOrder error response:', error.response?.data);
+    
     const data = error.response?.data;
     return {
       success: false,
@@ -277,7 +323,7 @@ async function placeOrder(params) {
   return placeOrderWithSmartRetry(params);
 }
 
-// 💵 Obtener balance USDT (QUERY PARAMS)
+// 💵 Obtener balance USDT
 async function getUSDTBalance() {
   if (!API_KEY || !API_SECRET) throw new Error('API key/secret no configurados');
   
@@ -297,14 +343,12 @@ async function getUSDTBalance() {
     const data = typeof res.data === 'string' ? JSON.parse(res.data) : res.data;
     
     if (data.code === 0) {
-      // Manejar diferentes formatos de respuesta
       if (data.data && data.data.balance) {
         if (typeof data.data.balance === 'object' && data.data.balance.balance) {
           return parseFloat(data.data.balance.balance);
         }
       }
       
-      // Formato array: { data: [{ asset: "USDT", balance: "123.45" }] }
       if (Array.isArray(data.data)) {
         const usdt = data.data.find(d => d.asset === 'USDT');
         return parseFloat(usdt?.balance || 0);
@@ -318,15 +362,19 @@ async function getUSDTBalance() {
   }
 }
 
-// 🛑 Cerrar todas posiciones (QUERY PARAMS como leverage)
+// 🛑 FUNCIÓN ULTRA-DEBUG - Cerrar todas posiciones
 async function closeAllPositions(symbol) {
   const startTime = Date.now();
+  console.log('🐛 [DEBUG] closeAllPositions iniciado para símbolo:', symbol);
   
   if (!API_KEY || !API_SECRET) throw new Error('API key/secret no configurados');
   
   try {
     const timestamp = Date.now();
     const normalizedSymbol = normalizeSymbol(symbol);
+    
+    console.log('🐛 [DEBUG] closeAllPositions timestamp:', timestamp);
+    console.log('🐛 [DEBUG] closeAllPositions símbolo normalizado:', normalizedSymbol);
     
     // ✅ PAYLOAD PARA QUERY PARAMS
     const payload = {
@@ -335,18 +383,35 @@ async function closeAllPositions(symbol) {
       type: 'MARKET'
     };
     
-    // ✅ USAR QUERY PARAMS (como leverage)
+    console.log('🐛 [DEBUG] closeAllPositions payload:', JSON.stringify(payload, null, 2));
+    
+    // ✅ CREAR PARÁMETROS CON DEBUG ULTRA-DETALLADO
     const params = getParametersOfficial(payload, timestamp, false);
     const parametersUrlEncoded = getParametersOfficial(payload, timestamp, true);
     const signature = crypto.createHmac('sha256', API_SECRET).update(params).digest('hex');
     const url = `https://${HOST}/openApi/swap/v2/trade/closeAllPositions?${parametersUrlEncoded}&signature=${signature}`;
     
-    console.log('🔧 Debug close parameters:', params);
+    console.log('🐛 [DEBUG] closeAllPositions URL completa:', url);
+    console.log('🐛 [DEBUG] closeAllPositions signature:', signature);
     
-    const res = await fastAxios.post(url, null, { 
+    // ✅ REQUEST CON DEBUG ULTRA-DETALLADO
+    const requestConfig = {
+      method: 'POST',
+      url: url,
       headers: { 'X-BX-APIKEY': API_KEY },
-      transformResponse: (resp) => resp
-    });
+      transformResponse: (resp) => {
+        console.log('🐛 [DEBUG] closeAllPositions respuesta cruda:', resp);
+        return resp;
+      }
+    };
+    
+    console.log('🐛 [DEBUG] closeAllPositions enviando request...');
+    const res = await fastAxios(requestConfig);
+    
+    console.log('🐛 [DEBUG] closeAllPositions status:', res.status);
+    console.log('🐛 [DEBUG] closeAllPositions headers:', res.headers);
+    console.log('🐛 [DEBUG] closeAllPositions data type:', typeof res.data);
+    console.log('🐛 [DEBUG] closeAllPositions data:', res.data);
     
     const latency = Date.now() - startTime;
     console.log(`⚡ Close procesado en ${latency}ms`);
@@ -354,6 +419,9 @@ async function closeAllPositions(symbol) {
     return JSON.parse(res.data);
   } catch (error) {
     const latency = Date.now() - startTime;
+    console.error('🐛 [DEBUG] closeAllPositions error completo:', error);
+    console.error('🐛 [DEBUG] closeAllPositions error message:', error.message);
+    console.error('🐛 [DEBUG] closeAllPositions error response:', error.response?.data);
     console.error(`❌ Error close en ${latency}ms:`, error.message);
     
     const data = error.response?.data;
