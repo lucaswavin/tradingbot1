@@ -105,26 +105,64 @@ async function getContractInfo(symbol) {
 async function placeOrderInternal({ symbol, side, leverage, usdtAmount }) {
   if (!API_KEY || !API_SECRET) throw new Error('API key/secret no configurados');
 
+  // 1) Establecer leverage
   await setLeverage(symbol, leverage);
-  const price = await getCurrentPrice(symbol);
-  let qty = Math.max(0.001, Math.round((usdtAmount * leverage / price) * 1000) / 1000);
 
+  // 2) Obtener precio y calcular cantidad
+  const price = await getCurrentPrice(symbol);
+  let quantity = Math.max(
+    0.001,
+    Math.round((usdtAmount * leverage / price) * 1000) / 1000
+  );
+
+  // 3) Preparar payload de la orden
   const payload = {
     symbol,
     side: side.toUpperCase(),
     positionSide: side.toUpperCase() === 'BUY' ? 'LONG' : 'SHORT',
     type: 'MARKET',
-    quantity: qty
+    quantity
   };
 
+  // 4) Firmar parámetros (solo timestamp y signature en query)
   const ts = Date.now();
-  const raw = buildParams(payload, ts, false);
-  const sig = signParams(raw);
-  const qp = buildParams(payload, ts, true);
-  const url = `https://${HOST}/openApi/swap/v2/trade/order?${qp}&signature=${sig}`;
+  const rawParams = buildParams(payload, ts, false);
+  const signature = signParams(rawParams);
+  const qp = `timestamp=${ts}&signature=${signature}`;
 
-  const res = await fastAxios.post(url, null, {
-    headers: { 'X-BX-APIKEY': API_KEY }
+  // 5) URL final con signature y timestamp
+  const url = `https://${HOST}/openApi/swap/v2/trade/order?${qp}`;
+
+  // 6) Ejecutar POST con payload en cuerpo
+  try {
+    const res = await fastAxios.post(url, payload, {
+      headers: { 'X-BX-APIKEY': API_KEY }
+    });
+    return res.data;
+  } catch (err) {
+    console.error('❌ Error en placeOrderInternal:', err.response?.data || err.message);
+    throw err;
+  }
+}
+
+async function closeAllPositions(symbol) {
+  const ts = Date.now();
+  const sym = normalizeSymbol(symbol);
+  const payload = { symbol: sym, side: 'BOTH', type: 'MARKET' };
+  const raw = buildParams(payload, ts, false);
+  const signature = signParams(raw);
+  const qp = `timestamp=${ts}&signature=${signature}`;
+  const url = `https://${HOST}/openApi/swap/v2/trade/closeAllPositions?${qp}`;
+  try {
+    const res = await fastAxios.post(url, payload, {
+      headers: { 'X-BX-APIKEY': API_KEY }
+    });
+    return res.data;
+  } catch (err) {
+    console.error('❌ Error en closeAllPositions:', err.response?.data || err.message);
+    throw err;
+  }
+}
   });
   return res.data;
 }
@@ -195,4 +233,5 @@ module.exports = {
   closeAllPositions,
   getContractInfo
 };
+
 
