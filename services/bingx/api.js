@@ -44,50 +44,50 @@ function normalizeSymbol(symbol) {
   return base;
 }
 
-// 🔐 FUNCIÓN DEBUG - Construir parámetros con ULTRA-LOGGING
-function getParametersOfficial(payload, timestamp, urlEncode = false) {
-  console.log('🐛 [DEBUG] Entrada getParametersOfficial:');
-  console.log('🐛 [DEBUG] - payload original:', JSON.stringify(payload, null, 2));
+// 🔐 FUNCIÓN OFICIAL - Siguiendo exactamente el ejemplo de BingX
+function getParameters(payload, timestamp, urlEncode = false) {
+  console.log('🐛 [DEBUG] getParameters entrada:');
+  console.log('🐛 [DEBUG] - payload:', JSON.stringify(payload, null, 2));
   console.log('🐛 [DEBUG] - timestamp:', timestamp);
   console.log('🐛 [DEBUG] - urlEncode:', urlEncode);
   
-  // Crear copia del payload SIN timestamp para evitar duplicados
-  const payloadWithoutTimestamp = { ...payload };
-  delete payloadWithoutTimestamp.timestamp;
+  let parameters = "";
   
-  console.log('🐛 [DEBUG] - payload sin timestamp:', JSON.stringify(payloadWithoutTimestamp, null, 2));
-  
-  const sortedKeys = Object.keys(payloadWithoutTimestamp).sort();
-  console.log('🐛 [DEBUG] - claves ordenadas:', sortedKeys);
-  
-  let params = '';
-  
-  for (const key of sortedKeys) {
-    const val = payloadWithoutTimestamp[key];
-    console.log(`🐛 [DEBUG] - procesando ${key}: ${val} (tipo: ${typeof val})`);
-    
-    if (val !== undefined && val !== null) {
-      const paramPart = urlEncode
-        ? `${key}=${encodeURIComponent(val)}&`
-        : `${key}=${val}&`;
-      console.log(`🐛 [DEBUG] - agregando: ${paramPart}`);
-      params += paramPart;
-    } else {
-      console.log(`🐛 [DEBUG] - saltando ${key} (undefined/null)`);
+  // Primero agregar todos los parámetros del payload
+  for (const key in payload) {
+    if (payload[key] !== undefined && payload[key] !== null) {
+      if (urlEncode) {
+        parameters += key + "=" + encodeURIComponent(payload[key]) + "&";
+      } else {
+        parameters += key + "=" + payload[key] + "&";
+      }
+      console.log(`🐛 [DEBUG] - agregado ${key}: ${payload[key]}`);
     }
   }
   
-  console.log('🐛 [DEBUG] - params antes de timestamp:', params);
-  
-  // Agregar timestamp AL FINAL una sola vez
-  if (params) {
-    params = params.slice(0, -1) + `&timestamp=${timestamp}`;
+  // Luego agregar timestamp AL FINAL (como en el ejemplo oficial)
+  if (parameters) {
+    parameters = parameters.substring(0, parameters.length - 1);
+    parameters = parameters + "&timestamp=" + timestamp;
   } else {
-    params = `timestamp=${timestamp}`;
+    parameters = "timestamp=" + timestamp;
   }
   
-  console.log('🐛 [DEBUG] - params finales:', params);
-  return params;
+  console.log('🐛 [DEBUG] - parameters finales:', parameters);
+  return parameters;
+}
+
+// 🔐 FUNCIÓN OFICIAL - Crear signature como en el ejemplo
+function createBingXSignature(payload, timestamp) {
+  const parameters = getParameters(payload, timestamp, false); // Sin URL encoding para signature
+  const signature = crypto
+    .createHmac('sha256', API_SECRET)
+    .update(parameters)
+    .digest('hex');
+  
+  console.log('🐛 [DEBUG] - parameters para signature:', parameters);
+  console.log('🐛 [DEBUG] - signature creada:', signature);
+  return signature;
 }
 
 // 💰 Obtener precio actual de mercado
@@ -103,7 +103,7 @@ async function getCurrentPrice(symbol) {
   }
 }
 
-// ℹ️ Obtener detalles de contrato (mínimos, stepSize, minNotional)
+// ℹ️ Obtener detalles de contrato
 async function getContractInfo(symbol) {
   try {
     const url = `https://${HOST}/openApi/swap/v2/quote/contracts`;
@@ -126,31 +126,41 @@ async function getContractInfo(symbol) {
   return { minOrderQty: 0.001, tickSize: 0.01, stepSize: 0.001, minNotional: 1 };
 }
 
-// ⚙️ Establecer leverage (QUERY PARAMS) - CON DEBUG
+// ⚙️ Establecer leverage SIGUIENDO EJEMPLO OFICIAL
 async function setLeverage(symbol, leverage = 5) {
   if (!API_KEY || !API_SECRET) throw new Error('API key/secret no configurados');
   
   try {
     console.log('🐛 [DEBUG] setLeverage iniciado');
     const timestamp = Date.now();
-    const payload = { symbol, side: 'LONG', leverage };
+    const payload = { 
+      symbol, 
+      side: 'LONG', 
+      leverage: leverage.toString() 
+    };
     
     console.log('🐛 [DEBUG] setLeverage payload:', JSON.stringify(payload, null, 2));
     
-    const params = getParametersOfficial(payload, timestamp, false);
-    const parametersUrlEncoded = getParametersOfficial(payload, timestamp, true);
-    const signature = crypto.createHmac('sha256', API_SECRET).update(params).digest('hex');
-    const url = `https://${HOST}/openApi/swap/v2/trade/leverage?${parametersUrlEncoded}&signature=${signature}`;
+    const signature = createBingXSignature(payload, timestamp);
+    const parametersEncoded = getParameters(payload, timestamp, true); // Con URL encoding para URL
+    const url = `https://${HOST}/openApi/swap/v2/trade/leverage?${parametersEncoded}&signature=${signature}`;
     
-    console.log('🐛 [DEBUG] setLeverage URL completa:', url);
+    console.log('🐛 [DEBUG] setLeverage URL:', url);
     
-    const res = await fastAxios.post(url, null, { 
+    const config = {
+      method: 'POST',
+      url: url,
       headers: { 'X-BX-APIKEY': API_KEY },
-      transformResponse: (resp) => resp
-    });
+      transformResponse: (resp) => {
+        console.log('🐛 [DEBUG] setLeverage raw response:', resp);
+        return resp;
+      }
+    };
     
-    console.log('🐛 [DEBUG] setLeverage respuesta:', res.data);
-    return JSON.parse(res.data);
+    const res = await fastAxios(config);
+    const data = JSON.parse(res.data);
+    console.log('🐛 [DEBUG] setLeverage respuesta:', data);
+    return data;
   } catch (error) {
     console.error('🐛 [DEBUG] setLeverage error:', error.message);
     console.warn('⚠️ Error al establecer leverage:', error.message);
@@ -158,7 +168,7 @@ async function setLeverage(symbol, leverage = 5) {
   }
 }
 
-// 🛒 FUNCIÓN ULTRA-DEBUG - Colocar orden
+// 🛒 FUNCIÓN SIGUIENDO EJEMPLO OFICIAL - Colocar orden
 async function placeOrderInternal({ symbol, side, leverage = 5, usdtAmount = 1 }) {
   console.log('🐛 [DEBUG] placeOrderInternal iniciado con:', { symbol, side, leverage, usdtAmount });
   
@@ -178,65 +188,45 @@ async function placeOrderInternal({ symbol, side, leverage = 5, usdtAmount = 1 }
     const timestamp = Date.now();
     const orderSide = side.toUpperCase();
     
-    // ✅ PAYLOAD PARA QUERY PARAMS
+    // ✅ PAYLOAD SIGUIENDO EJEMPLO OFICIAL
     const payload = {
       symbol,
       side: orderSide,
       positionSide: orderSide === 'BUY' ? 'LONG' : 'SHORT',
       type: 'MARKET',
-      quantity: quantity.toString(),
-      workingType: 'CONTRACT_PRICE',
-      priceProtect: 'false'
+      quantity: quantity.toString()
     };
 
-    console.log('🐛 [DEBUG] placeOrder payload completo:', JSON.stringify(payload, null, 2));
-    console.log('🐛 [DEBUG] placeOrder timestamp:', timestamp);
+    console.log('🐛 [DEBUG] placeOrder payload:', JSON.stringify(payload, null, 2));
 
-    // ✅ CREAR PARÁMETROS CON DEBUG
-    const params = getParametersOfficial(payload, timestamp, false);
-    const parametersUrlEncoded = getParametersOfficial(payload, timestamp, true);
-    const signature = crypto.createHmac('sha256', API_SECRET).update(params).digest('hex');
-    const url = `https://${HOST}/openApi/swap/v2/trade/order?${parametersUrlEncoded}&signature=${signature}`;
+    const signature = createBingXSignature(payload, timestamp);
+    const parametersEncoded = getParameters(payload, timestamp, true); // Con URL encoding para URL
+    const url = `https://${HOST}/openApi/swap/v2/trade/order?${parametersEncoded}&signature=${signature}`;
 
-    console.log('🐛 [DEBUG] placeOrder URL completa:', url);
-    console.log('🐛 [DEBUG] placeOrder headers:', { 'X-BX-APIKEY': `${API_KEY.substring(0,8)}...` });
+    console.log('🐛 [DEBUG] placeOrder URL:', url);
 
-    // ✅ REQUEST CON DEBUG ULTRA-DETALLADO
-    console.log('🐛 [DEBUG] Enviando request...');
-    const requestConfig = {
+    const config = {
       method: 'POST',
       url: url,
       headers: { 'X-BX-APIKEY': API_KEY },
       transformResponse: (resp) => {
-        console.log('🐛 [DEBUG] Respuesta cruda de BingX:', resp);
+        console.log('🐛 [DEBUG] placeOrder raw response:', resp);
         return resp;
       }
     };
-    
-    console.log('🐛 [DEBUG] Config del request:', {
-      method: requestConfig.method,
-      url: requestConfig.url,
-      headers: { 'X-BX-APIKEY': `${API_KEY.substring(0,8)}...` }
-    });
 
-    const res = await fastAxios(requestConfig);
-    
-    console.log('🐛 [DEBUG] Status code:', res.status);
-    console.log('🐛 [DEBUG] Headers respuesta:', res.headers);
-    console.log('🐛 [DEBUG] Data type:', typeof res.data);
-    console.log('🐛 [DEBUG] Data content:', res.data);
-    
-    return JSON.parse(res.data);
+    const res = await fastAxios(config);
+    const data = JSON.parse(res.data);
+    console.log('🐛 [DEBUG] placeOrder respuesta:', data);
+    return data;
   } catch (error) {
-    console.error('🐛 [DEBUG] placeOrder error completo:', error);
-    console.error('🐛 [DEBUG] placeOrder error message:', error.message);
-    console.error('🐛 [DEBUG] placeOrder error response:', error.response?.data);
+    console.error('🐛 [DEBUG] placeOrder error:', error.message);
+    console.error('🐛 [DEBUG] placeOrder response:', error.response?.data);
     
-    const data = error.response?.data;
     return {
       success: false,
       message: error.message,
-      error: typeof data === 'string' ? JSON.parse(data) : data
+      error: error.response?.data
     };
   }
 }
@@ -323,24 +313,31 @@ async function placeOrder(params) {
   return placeOrderWithSmartRetry(params);
 }
 
-// 💵 Obtener balance USDT
+// 💵 Obtener balance USDT SIGUIENDO EJEMPLO OFICIAL
 async function getUSDTBalance() {
   if (!API_KEY || !API_SECRET) throw new Error('API key/secret no configurados');
   
   try {
     const timestamp = Date.now();
-    const parameters = `timestamp=${timestamp}`;
-    const signature = crypto.createHmac('sha256', API_SECRET).update(parameters).digest('hex');
-    const url = `https://${HOST}/openApi/swap/v2/user/balance?${parameters}&signature=${signature}`;
+    const payload = {}; // Balance no necesita payload adicional
     
-    const res = await fastAxios.get(url, { 
+    const signature = createBingXSignature(payload, timestamp);
+    const parametersEncoded = getParameters(payload, timestamp, true);
+    const url = `https://${HOST}/openApi/swap/v2/user/balance?${parametersEncoded}&signature=${signature}`;
+    
+    const config = {
+      method: 'GET',
+      url: url,
       headers: { 'X-BX-APIKEY': API_KEY },
-      transformResponse: (resp) => resp
-    });
+      transformResponse: (resp) => {
+        console.log('🐛 [DEBUG] balance raw response:', resp);
+        return resp;
+      }
+    };
     
-    console.log('🔍 Balance response type:', typeof res.data);
-    
-    const data = typeof res.data === 'string' ? JSON.parse(res.data) : res.data;
+    const res = await fastAxios(config);
+    const data = JSON.parse(res.data);
+    console.log('🔍 Balance response:', data);
     
     if (data.code === 0) {
       if (data.data && data.data.balance) {
@@ -362,7 +359,7 @@ async function getUSDTBalance() {
   }
 }
 
-// 🛑 FUNCIÓN ULTRA-DEBUG - Cerrar todas posiciones
+// 🛑 FUNCIÓN SIGUIENDO EJEMPLO OFICIAL - Cerrar todas posiciones
 async function closeAllPositions(symbol) {
   const startTime = Date.now();
   console.log('🐛 [DEBUG] closeAllPositions iniciado para símbolo:', symbol);
@@ -376,7 +373,7 @@ async function closeAllPositions(symbol) {
     console.log('🐛 [DEBUG] closeAllPositions timestamp:', timestamp);
     console.log('🐛 [DEBUG] closeAllPositions símbolo normalizado:', normalizedSymbol);
     
-    // ✅ PAYLOAD PARA QUERY PARAMS
+    // ✅ PAYLOAD SIGUIENDO EJEMPLO OFICIAL
     const payload = {
       symbol: normalizedSymbol,
       side: 'BOTH',
@@ -385,50 +382,40 @@ async function closeAllPositions(symbol) {
     
     console.log('🐛 [DEBUG] closeAllPositions payload:', JSON.stringify(payload, null, 2));
     
-    // ✅ CREAR PARÁMETROS CON DEBUG ULTRA-DETALLADO
-    const params = getParametersOfficial(payload, timestamp, false);
-    const parametersUrlEncoded = getParametersOfficial(payload, timestamp, true);
-    const signature = crypto.createHmac('sha256', API_SECRET).update(params).digest('hex');
-    const url = `https://${HOST}/openApi/swap/v2/trade/closeAllPositions?${parametersUrlEncoded}&signature=${signature}`;
+    const signature = createBingXSignature(payload, timestamp);
+    const parametersEncoded = getParameters(payload, timestamp, true); // Con URL encoding para URL
+    const url = `https://${HOST}/openApi/swap/v2/trade/closeAllPositions?${parametersEncoded}&signature=${signature}`;
     
-    console.log('🐛 [DEBUG] closeAllPositions URL completa:', url);
-    console.log('🐛 [DEBUG] closeAllPositions signature:', signature);
+    console.log('🐛 [DEBUG] closeAllPositions URL:', url);
     
-    // ✅ REQUEST CON DEBUG ULTRA-DETALLADO
-    const requestConfig = {
+    const config = {
       method: 'POST',
       url: url,
       headers: { 'X-BX-APIKEY': API_KEY },
       transformResponse: (resp) => {
-        console.log('🐛 [DEBUG] closeAllPositions respuesta cruda:', resp);
+        console.log('🐛 [DEBUG] closeAllPositions raw response:', resp);
         return resp;
       }
     };
     
-    console.log('🐛 [DEBUG] closeAllPositions enviando request...');
-    const res = await fastAxios(requestConfig);
-    
-    console.log('🐛 [DEBUG] closeAllPositions status:', res.status);
-    console.log('🐛 [DEBUG] closeAllPositions headers:', res.headers);
-    console.log('🐛 [DEBUG] closeAllPositions data type:', typeof res.data);
-    console.log('🐛 [DEBUG] closeAllPositions data:', res.data);
+    const res = await fastAxios(config);
+    const data = JSON.parse(res.data);
+    console.log('🐛 [DEBUG] closeAllPositions respuesta:', data);
     
     const latency = Date.now() - startTime;
     console.log(`⚡ Close procesado en ${latency}ms`);
     
-    return JSON.parse(res.data);
+    return data;
   } catch (error) {
     const latency = Date.now() - startTime;
-    console.error('🐛 [DEBUG] closeAllPositions error completo:', error);
-    console.error('🐛 [DEBUG] closeAllPositions error message:', error.message);
-    console.error('🐛 [DEBUG] closeAllPositions error response:', error.response?.data);
+    console.error('🐛 [DEBUG] closeAllPositions error:', error.message);
+    console.error('🐛 [DEBUG] closeAllPositions response:', error.response?.data);
     console.error(`❌ Error close en ${latency}ms:`, error.message);
     
-    const data = error.response?.data;
     return {
       success: false,
       message: error.message,
-      error: typeof data === 'string' ? JSON.parse(data) : data
+      error: error.response?.data
     };
   }
 }
