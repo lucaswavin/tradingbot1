@@ -21,7 +21,6 @@ const fastAxios = axios.create({
   timeout: 5000,
   headers: {
     'Connection': 'keep-alive'
-    // No pongas Content-Type para POST body null/query-only
   }
 });
 
@@ -30,7 +29,7 @@ console.log('🔑 BingX API Keys configuradas:', {
   secret: API_SECRET ? `${API_SECRET.substring(0, 8)}...` : 'NO CONFIGURADA'
 });
 
-// Normaliza símbolos (BTCUSDT -> BTC-USDT)
+// Normaliza símbolos (BTCUSDT.P -> BTC-USDT)
 function normalizeSymbol(symbol) {
   if (!symbol) return symbol;
   let base = symbol.replace(/\.P$/, '');
@@ -54,14 +53,14 @@ function buildParams(payload, timestamp, urlEncode = false) {
 // Firma la query
 function signParams(rawParams) {
   return crypto.createHmac('sha256', API_SECRET)
-               .update(rawParams)
-               .digest('hex');
+    .update(rawParams)
+    .digest('hex');
 }
 
 // Establece leverage (GET, firmado)
-async function setLeverage(symbol, leverage = 5) {
+async function setLeverage(symbol, leverage = 5, positionSide = 'LONG') {
   if (!API_KEY || !API_SECRET) throw new Error('API key/secret no configurados');
-  const payload = { symbol, side: 'LONG', leverage };
+  const payload = { symbol, side: positionSide, leverage };
   const ts = Date.now();
   const raw = buildParams(payload, ts, false);
   const sig = signParams(raw);
@@ -92,45 +91,108 @@ async function getContractInfo(symbol) {
       if (c) {
         return {
           minOrderQty: parseFloat(c.minOrderQty || '0.001'),
-          tickSize:    parseFloat(c.tickSize    || '0.01'),
-          stepSize:    parseFloat(c.stepSize    || '0.001'),
+          tickSize: parseFloat(c.tickSize || '0.01'),
+          stepSize: parseFloat(c.stepSize || '0.001'),
           minNotional: parseFloat(c.minNotional || '1')
         };
       }
     }
   } catch {}
-  return { minOrderQty:0.001, tickSize:0.01, stepSize:0.001, minNotional:1 };
+  return { minOrderQty: 0.001, tickSize: 0.01, stepSize: 0.001, minNotional: 1 };
 }
 
-// -------- ORDEN CORRECTA (POST body null, todo en query) --------
-async function placeOrderInternal({ symbol, side, leverage, usdtAmount }) {
-  console.log(`🚀 placeOrderInternal => symbol: ${symbol}, side: ${side}, leverage: ${leverage}, usdtAmount: ${usdtAmount}`);
+// Calcula TP/SL por % si hace falta
+function buildTPSL(price, tpPercent, slPercent, side = 'BUY') {
+  const tpDec = (tpPercent || 0) / 100;
+  const slDec = (slPercent || 0) / 100;
+
+  let tp, sl;
+  if (side.toUpperCase() === 'BUY') {
+    tp = price * (1 + tpDec);
+    sl = price * (1 - slDec);
+  } else {
+    tp = price * (1 - tpDec);
+    sl = price * (1 + slDec);
+  }
+
+  const tpObj = tpPercent ? {
+    type: "TAKE_PROFIT_MARKET",
+    stopPrice: parseFloat(tp.toFixed(6)),
+    price: parseFloat(tp.toFixed(6)),
+    workingType: "MARK_PRICE"
+  } : undefined;
+
+  const slObj = slPercent ? {
+    type: "STOP_MARKET",
+    stopPrice: parseFloat(sl.toFixed(6)),
+    price: parseFloat(sl.toFixed(6)),
+    workingType: "MARK_PRICE"
+  } : undefined;
+
+  return { takeProfit: tpObj, stopLoss: slObj };
+}
+
+// ORDEN ULTRA FLEXIBLE
+async function placeOrderInternal(params) {
+  const {
+    symbol,
+    side,
+    leverage = 5,
+    usdtAmount = 1,
+    tpPercent,
+    slPercent,
+    takeProfit,
+    stopLoss,
+    trailing,
+    quantity,
+    positionSide,
+    reduceOnly,
+    closeOnTrigger
+  } = params;
+
+  console.log(`🚀 placeOrderInternal =>`, params);
+
   if (!API_KEY || !API_SECRET) throw new Error('API key/secret no configurados');
 
-  // 1) Establece leverage
-  await setLeverage(symbol, leverage);
+  // 1) Establece leverage (acepta param positionSide)
+  await setLeverage(symbol, leverage, positionSide || (side && side.toUpperCase() === 'BUY' ? 'LONG' : 'SHORT'));
 
-  // 2) Precio y cantidad
+  // 2) Precio y cantidad (si no envías quantity, lo calcula)
   const price = await getCurrentPrice(symbol);
-  const quantity = Math.max(0.001, Math.round((usdtAmount * leverage / price) * 1000) / 1000);
+  const realQty = quantity !== undefined
+    ? parseFloat(quantity)
+    : Math.max(0.001, Math.round((usdtAmount * leverage / price) * 1000) / 1000);
 
-  // 3) Payload (solo los campos que requiere BingX)
+  // 3) Calcula TP/SL por percent si hace falta
+  const { takeProfit: tpCalc, stopLoss: slCalc } = buildTPSL(price, tpPercent, slPercent, side);
+
+  // 4) Payload ultra flexible
   const payload = {
     symbol,
     side: side.toUpperCase(),
-    positionSide: side.toUpperCase() === 'BUY' ? 'LONG' : 'SHORT',
+    positionSide: (positionSide || (side && side.toUpperCase() === 'BUY' ? 'LONG' : 'SHORT')),
     type: 'MARKET',
-    quantity
+    quantity: realQty
   };
+  if (takeProfit || tpCalc)   payload.takeProfit   = JSON.stringify(takeProfit || tpCalc);
+  if (stopLoss   || slCalc)   payload.stopLoss     = JSON.stringify(stopLoss   || slCalc);
+  if (trailing)               payload.trailingStop = JSON.stringify({
+    type: "TRAILING_STOP_MARKET",
+    callbackRate: trailing.callbackRate || 0.8,
+    ...(trailing.activationPrice ? { activationPrice: trailing.activationPrice } : {}),
+    workingType: "MARK_PRICE"
+  });
+  if (reduceOnly !== undefined)     payload.reduceOnly = reduceOnly;
+  if (closeOnTrigger !== undefined) payload.closeOnTrigger = closeOnTrigger;
 
-  // 4) Firma y query
+  // 5) Firma y query
   const ts = Date.now();
   const raw = buildParams(payload, ts, false);
   const sig = signParams(raw);
   const qp = buildParams(payload, ts, true) + `&signature=${sig}`;
   const url = `https://${HOST}/openApi/swap/v2/trade/order?${qp}`;
 
-  // 5) POST con body null
+  // 6) POST con body null
   try {
     console.log('📋 Orden (payload/query):', payload);
     console.log('🔗 URL:', url);
@@ -146,9 +208,11 @@ async function placeOrderInternal({ symbol, side, leverage, usdtAmount }) {
 }
 
 // Retry mínimo inteligente
-async function placeOrderWithSmartRetry({ symbol, side, leverage = 5 }) {
-  const sym = normalizeSymbol(symbol);
-  let result = await placeOrderInternal({ symbol: sym, side, leverage, usdtAmount: 1 });
+async function placeOrderWithSmartRetry(params) {
+  const sym = normalizeSymbol(params.symbol);
+  const baseParams = { ...params, symbol: sym };
+
+  let result = await placeOrderInternal(baseParams);
   if (result.code === 0) return result;
 
   const msg = result.msg || result.message || '';
@@ -164,7 +228,7 @@ async function placeOrderWithSmartRetry({ symbol, side, leverage = 5 }) {
       minUSDT = info.minNotional;
     }
     const retryAmt = Math.ceil(minUSDT * 1.1 * 100) / 100;
-    result = await placeOrderInternal({ symbol: sym, side, leverage, usdtAmount: retryAmt });
+    result = await placeOrderInternal({ ...baseParams, usdtAmount: retryAmt });
   }
   return result;
 }
@@ -219,7 +283,6 @@ module.exports = {
   getContractInfo,
   closeAllPositions
 };
-
 
 
 
