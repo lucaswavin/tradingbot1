@@ -28,8 +28,8 @@ const fastAxios = axios.create({
 
 // 🔑 Log de configuración de claves
 console.log('🔑 BingX API Keys configuradas:', {
-  apiKey: API_KEY ? `${API_KEY.substring(0,8)}...` : 'NO CONFIGURADA',
-  secret: API_SECRET ? `${API_SECRET.substring(0,8)}...` : 'NO CONFIGURADA'
+  apiKey: API_KEY ? `${API_KEY.substring(0, 8)}...` : 'NO CONFIGURADA',
+  secret: API_SECRET ? `${API_SECRET.substring(0, 8)}...` : 'NO CONFIGURADA'
 });
 
 // 🔄 Normalizar símbolos (e.g. BTCUSDT -> BTC-USDT)
@@ -57,9 +57,10 @@ function getParametersOfficial(payload, timestamp, urlEncode = false) {
   for (const key of sortedKeys) {
     const val = payloadWithoutTimestamp[key];
     if (val !== undefined && val !== null) {
+      const value = typeof val === 'object' ? JSON.stringify(val) : val;
       params += urlEncode
-        ? `${key}=${encodeURIComponent(val)}&`
-        : `${key}=${val}&`;
+        ? `${key}=${encodeURIComponent(value)}&`
+        : `${key}=${value}&`;
     }
   }
   
@@ -140,7 +141,7 @@ async function setLeverage(symbol, leverage = 5) {
   }
 }
 
-// 🛒 FUNCIÓN PRINCIPAL - Payload MÍNIMO como ejemplo oficial Python
+// 🛒 FUNCIÓN PRINCIPAL - Enviar payload en cuerpo POST
 async function placeOrderInternal({ symbol, side, leverage = 5, usdtAmount = 1 }) {
   if (!API_KEY || !API_SECRET) throw new Error('API key/secret no configurados');
 
@@ -168,31 +169,27 @@ async function placeOrderInternal({ symbol, side, leverage = 5, usdtAmount = 1 }
     const timestamp = Date.now();
     const orderSide = side.toUpperCase();
     
-    // ✅ PAYLOAD MÍNIMO - EXACTAMENTE como ejemplo oficial Python
+    // ✅ PAYLOAD MÍNIMO - EXACTAMENTE como ejemplo oficial
     const payload = {
       symbol: symbol,
       side: orderSide,
       positionSide: orderSide === 'BUY' ? 'LONG' : 'SHORT',
       type: 'MARKET',
-      quantity: quantity  // ← COMO NÚMERO, no string
+      quantity: quantity
     };
 
-    console.log('📋 Payload orden MÍNIMO:', JSON.stringify(payload, null, 2));
+    console.log('📋 Payload orden:', JSON.stringify(payload, null, 2));
 
-    // ✅ CREAR QUERY STRING como ejemplo Python
+    // ✅ CREAR QUERY STRING solo con timestamp y signature
     const paramsForSig = getParametersOfficial(payload, timestamp, false);
     const signature = crypto.createHmac('sha256', API_SECRET).update(paramsForSig).digest('hex');
-    const parametersUrlEncoded = getParametersOfficial(payload, timestamp, true);
+    const url = `https://${HOST}/openApi/swap/v2/trade/order?timestamp=${timestamp}&signature=${signature}`;
     
     console.log('🔧 Debug parameters para signature:', paramsForSig);
     console.log('🔧 Debug signature:', signature);
-
-    // ✅ ENVIAR COMO QUERY PARAMS (como balance que funciona)
-    const url = `https://${HOST}/openApi/swap/v2/trade/order?${parametersUrlEncoded}&signature=${signature}`;
-    
     console.log('🔧 Debug URL completa:', url);
     
-    const res = await fastAxios.post(url, null, { 
+    const res = await fastAxios.post(url, payload, { 
       headers: { 'X-BX-APIKEY': API_KEY },
       transformResponse: (resp) => {
         console.log('🔧 Raw response:', resp);
@@ -211,7 +208,7 @@ async function placeOrderInternal({ symbol, side, leverage = 5, usdtAmount = 1 }
       console.log(`✅ Leverage: ${leverage}x`);
       console.log(`✅ Inversión: ${usdtAmount} USDT`);
       if (result.data?.orderId) {
-        console.log(`✅ Order ID: ${result.data.orderId}`);
+        console.log(`✅ Order ID: ${BigInt(result.data.orderId).toString()}`);
       }
     }
     
@@ -348,7 +345,7 @@ async function getUSDTBalance() {
   }
 }
 
-// 🛑 FUNCIÓN - Cerrar todas posiciones con QUERY PARAMS
+// 🛑 FUNCIÓN - Cerrar todas posiciones con CUERPO POST
 async function closeAllPositions(symbol) {
   const startTime = Date.now();
   
@@ -369,20 +366,16 @@ async function closeAllPositions(symbol) {
     
     console.log('📋 Payload close:', JSON.stringify(payload, null, 2));
     
-    // ✅ CREAR QUERY STRING
+    // ✅ CREAR QUERY STRING solo con timestamp y signature
     const params = getParametersOfficial(payload, timestamp, false);
     const signature = crypto.createHmac('sha256', API_SECRET).update(params).digest('hex');
-    const parametersUrlEncoded = getParametersOfficial(payload, timestamp, true);
+    const url = `https://${HOST}/openApi/swap/v2/trade/closeAllPositions?timestamp=${timestamp}&signature=${signature}`;
     
     console.log('🔧 Debug close parameters:', params);
     console.log('🔧 Debug close signature:', signature);
-    
-    // ✅ ENVIAR COMO QUERY PARAMS
-    const url = `https://${HOST}/openApi/swap/v2/trade/closeAllPositions?${parametersUrlEncoded}&signature=${signature}`;
-    
     console.log('🔧 Debug close URL:', url);
     
-    const res = await fastAxios.post(url, null, { 
+    const res = await fastAxios.post(url, payload, { 
       headers: { 'X-BX-APIKEY': API_KEY },
       transformResponse: (resp) => {
         console.log('🔧 Close raw response:', resp);
