@@ -313,6 +313,59 @@ function validateWebhookData(data) {
   return data;
 }
 
+async function getCurrentPositionSize(symbol, positionSide) {
+  try {
+    console.log(`📊 Obteniendo tamaño real de posición ${symbol} ${positionSide}...`);
+    
+    const payload = { symbol };
+    const ts = Date.now();
+    const raw = buildParams(payload, ts, false);
+    const sig = signParams(raw);
+    const qp = buildParams(payload, ts, true) + `&signature=${sig}`;
+    const url = `https://${HOST}/openApi/swap/v2/user/positions?${qp}`;
+
+    const response = await fastAxios.get(url, {
+      headers: { 'X-BX-APIKEY': API_KEY }
+    });
+
+    if (response.data?.code === 0 && response.data.data) {
+      const positions = Array.isArray(response.data.data) ? response.data.data : [response.data.data];
+      const position = positions.find(p => p.symbol === symbol);
+      
+      if (position) {
+        const positionAmt = parseFloat(position.positionAmt);
+        const absSize = Math.abs(positionAmt);
+        const actualSide = positionAmt > 0 ? 'LONG' : 'SHORT';
+        
+        console.log(`📊 Posición real encontrada:`);
+        console.log(`   - Lado: ${actualSide}`);
+        console.log(`   - Tamaño: ${absSize}`);
+        console.log(`   - Precio promedio: ${position.entryPrice}`);
+        
+        // Solo devolver si el lado coincide
+        if (actualSide === positionSide) {
+          return {
+            size: absSize,
+            side: actualSide,
+            entryPrice: parseFloat(position.entryPrice),
+            positionAmt: positionAmt
+          };
+        } else {
+          console.log(`⚠️ Lado de posición no coincide: esperado ${positionSide}, encontrado ${actualSide}`);
+          return null;
+        }
+      }
+    }
+    
+    console.log(`📊 No se encontró posición para ${symbol} ${positionSide}`);
+    return null;
+    
+  } catch (error) {
+    console.error('❌ Error obteniendo posición actual:', error.message);
+    return null;
+  }
+}
+
 // ================== CANCELAR TP/SL EXISTENTES ==================
 async function cancelAllTPSLOrders(symbol) {
   try {
@@ -523,8 +576,9 @@ async function placeOrderInternal(params) {
   if (hasTPSL) {
     console.log('\n🎯 === CONFIGURANDO TP/SL UNIFICADOS ===');
     
-    // Esperar un poco para que la posición se actualice completamente
-    await new Promise(resolve => setTimeout(resolve, 2000));
+    // Esperar más tiempo para que la posición se actualice completamente en BingX
+    console.log('⏳ Esperando que BingX actualice la posición después de la reentrada...');
+    await new Promise(resolve => setTimeout(resolve, 5000)); // ✅ 5 segundos en lugar de 2
     
     // ✅ USAR PRECIO PROMEDIO PARA CALCULAR TP/SL
     const basePrice = avgEntryPrice; // Precio base para TP/SL
@@ -605,15 +659,31 @@ async function placeOrderInternal(params) {
       console.log(`   - Final ajustado: ${finalSlPrice} (tickSize: ${contract.tickSize})`);
     }
 
-    // ✅ CREAR TP/SL CON LA CANTIDAD TOTAL UNIFICADA
+    // ✅ CREAR TP/SL CON LA CANTIDAD REAL DE LA POSICIÓN (NO LA CALCULADA)
     // Crear Take Profit
     if (finalTpPrice) {
+      // ✅ OBTENER CANTIDAD REAL DE LA POSICIÓN ACTUALIZADA
+      console.log('\n🔍 Verificando cantidad real de posición para TP...');
+      let realPositionSize = totalQuantity; // Fallback a cantidad calculada
+      
+      try {
+        const realPosition = await getCurrentPositionSize(symbol, posSide);
+        if (realPosition && realPosition.size > 0) {
+          realPositionSize = realPosition.size;
+          console.log(`📊 Cantidad real de posición: ${realPositionSize} (vs calculado: ${totalQuantity})`);
+        } else {
+          console.log(`⚠️ No se pudo obtener posición real, usando calculado: ${totalQuantity}`);
+        }
+      } catch (e) {
+        console.log(`⚠️ Error obteniendo posición real: ${e.message}, usando calculado: ${totalQuantity}`);
+      }
+      
       const tpPayload = {
         symbol,
         side: posSide === 'LONG' ? 'SELL' : 'BUY',
         positionSide: posSide,
         type: 'TAKE_PROFIT_MARKET',
-        quantity: totalQuantity, // ✅ Cantidad total unificada
+        quantity: realPositionSize, // ✅ Usar cantidad real de BingX
         stopPrice: finalTpPrice,
         workingType: 'MARK_PRICE'
       };
@@ -625,7 +695,7 @@ async function placeOrderInternal(params) {
         const qp2 = buildParams(tpPayload, ts2, true) + `&signature=${sig2}`;
         const tpUrl = `https://${HOST}/openApi/swap/v2/trade/order?${qp2}`;
         
-        console.log(`📈 Creando TP unificado para ${totalQuantity} unidades @ ${finalTpPrice}`);
+        console.log(`📈 Creando TP con cantidad REAL: ${realPositionSize} unidades @ ${finalTpPrice}`);
         tpOrder = await fastAxios.post(tpUrl, null, { 
           headers: { 'X-BX-APIKEY': API_KEY } 
         });
@@ -644,12 +714,28 @@ async function placeOrderInternal(params) {
 
     // Crear Stop Loss
     if (finalSlPrice) {
+      // ✅ OBTENER CANTIDAD REAL DE LA POSICIÓN ACTUALIZADA
+      console.log('\n🔍 Verificando cantidad real de posición para SL...');
+      let realPositionSize = totalQuantity; // Fallback a cantidad calculada
+      
+      try {
+        const realPosition = await getCurrentPositionSize(symbol, posSide);
+        if (realPosition && realPosition.size > 0) {
+          realPositionSize = realPosition.size;
+          console.log(`📊 Cantidad real de posición: ${realPositionSize} (vs calculado: ${totalQuantity})`);
+        } else {
+          console.log(`⚠️ No se pudo obtener posición real, usando calculado: ${totalQuantity}`);
+        }
+      } catch (e) {
+        console.log(`⚠️ Error obteniendo posición real: ${e.message}, usando calculado: ${totalQuantity}`);
+      }
+      
       const slPayload = {
         symbol,
         side: posSide === 'LONG' ? 'SELL' : 'BUY',
         positionSide: posSide,
         type: 'STOP_MARKET',
-        quantity: totalQuantity, // ✅ Cantidad total unificada
+        quantity: realPositionSize, // ✅ Usar cantidad real de BingX
         stopPrice: finalSlPrice,
         workingType: 'MARK_PRICE'
       };
@@ -661,7 +747,7 @@ async function placeOrderInternal(params) {
         const qp3 = buildParams(slPayload, ts3, true) + `&signature=${sig3}`;
         const slUrl = `https://${HOST}/openApi/swap/v2/trade/order?${qp3}`;
         
-        console.log(`🛡️ Creando SL unificado para ${totalQuantity} unidades @ ${finalSlPrice}`);
+        console.log(`🛡️ Creando SL con cantidad REAL: ${realPositionSize} unidades @ ${finalSlPrice}`);
         slOrder = await fastAxios.post(slUrl, null, { 
           headers: { 'X-BX-APIKEY': API_KEY } 
         });
@@ -828,5 +914,7 @@ module.exports = {
   closeAllPositions,
   cleanWebhookData,
   validateWebhookData,
-  cancelAllTPSLOrders
+  cancelAllTPSLOrders,
+  checkExistingPosition,
+  getCurrentPositionSize
 };
