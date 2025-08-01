@@ -270,19 +270,39 @@ async function placeOrderInternal(params) {
       headers: { 'X-BX-APIKEY': API_KEY }
     });
     
-    console.log('📨 Respuesta orden principal:', JSON.stringify(orderResp.data, null, 2));
+    console.log('\n🔍 === DEBUG RESPUESTA COMPLETA ===');
+    console.log('📨 Status HTTP:', orderResp.status);
+    console.log('📨 Data completa:', JSON.stringify(orderResp.data, null, 2));
     
     if (orderResp.data?.code !== 0) {
+      console.log('❌ Código de error BingX:', orderResp.data?.code);
+      console.log('❌ Mensaje de error:', orderResp.data?.msg);
       throw new Error(`Error en orden principal: ${orderResp.data?.msg || 'Sin detalle'}`);
     }
+    
   } catch (err) {
-    console.error('❌ Error orden principal:', err.response?.data || err.message);
+    console.log('\n🔍 === DEBUG ERROR COMPLETO ===');
+    console.error('❌ Error message:', err.message);
+    console.error('❌ Response status:', err.response?.status);
+    console.error('❌ Response data:', JSON.stringify(err.response?.data, null, 2));
     throw err;
   }
 
-  const orderId = orderResp.data?.data?.orderId;
+  console.log('\n🔍 === DEBUG ORDER ID ===');
+  console.log('📋 orderResp.data:', JSON.stringify(orderResp.data, null, 2));
+  console.log('📋 orderResp.data?.data:', JSON.stringify(orderResp.data?.data, null, 2));
+  
+  // Intentar múltiples formas de obtener el orderId
+  let orderId = orderResp.data?.data?.orderId 
+             || orderResp.data?.data?.order?.orderId
+             || orderResp.data?.orderId
+             || orderResp.data?.order?.orderId;
+             
+  console.log('🎯 OrderId encontrado:', orderId);
+  
   if (!orderId) {
-    throw new Error('No se obtuvo orderId de la respuesta');
+    console.log('❌ ESTRUCTURA DE RESPUESTA NO ESPERADA');
+    throw new Error(`No se obtuvo orderId. Estructura: ${JSON.stringify(orderResp.data)}`);
   }
 
   // 6) OBTENER PRECIO REAL DE EJECUCIÓN
