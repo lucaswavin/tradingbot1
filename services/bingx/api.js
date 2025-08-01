@@ -108,6 +108,112 @@ async function getContractInfo(symbol) {
   return { minOrderQty: 0.001, tickSize: 0.01, stepSize: 0.001, minNotional: 1, maxLeverage: 20 };
 }
 
+// ================== NUEVAS FUNCIONES PARA REENTRADAS ==================
+
+async function getExistingPosition(symbol) {
+  try {
+    console.log(`🔍 Consultando posición existente para ${symbol}...`);
+    
+    const payload = { symbol };
+    const ts = Date.now();
+    const raw = buildParams(payload, ts, false);
+    const sig = signParams(raw);
+    const qp = buildParams(payload, ts, true) + `&signature=${sig}`;
+    const url = `https://${HOST}/openApi/swap/v2/user/positions?${qp}`;
+
+    const response = await fastAxios.get(url, {
+      headers: { 'X-BX-APIKEY': API_KEY }
+    });
+
+    if (response.data?.code === 0 && response.data.data) {
+      const positions = Array.isArray(response.data.data) ? response.data.data : [response.data.data];
+      const position = positions.find(p => p.symbol === symbol && parseFloat(p.positionAmt) !== 0);
+      
+      if (position) {
+        const size = Math.abs(parseFloat(position.positionAmt));
+        const entryPrice = parseFloat(position.entryPrice);
+        const side = parseFloat(position.positionAmt) > 0 ? 'LONG' : 'SHORT';
+        
+        console.log(`📊 Posición existente encontrada:`);
+        console.log(`   - Lado: ${side}`);
+        console.log(`   - Tamaño: ${size}`);
+        console.log(`   - Precio entrada: ${entryPrice}`);
+        
+        return {
+          exists: true,
+          side,
+          size,
+          entryPrice,
+          data: position
+        };
+      }
+    }
+    
+    console.log(`📊 No hay posición existente para ${symbol}`);
+    return { exists: false };
+    
+  } catch (error) {
+    console.error('❌ Error consultando posición:', error.message);
+    return { exists: false };
+  }
+}
+
+async function cancelExistingTPSL(symbol, positionSide) {
+  try {
+    console.log(`🗑️ Cancelando TP/SL existentes para ${symbol} ${positionSide}...`);
+    
+    // Obtener órdenes abiertas
+    const payload = { symbol };
+    const ts = Date.now();
+    const raw = buildParams(payload, ts, false);
+    const sig = signParams(raw);
+    const qp = buildParams(payload, ts, true) + `&signature=${sig}`;
+    const url = `https://${HOST}/openApi/swap/v2/trade/openOrders?${qp}`;
+
+    const response = await fastAxios.get(url, {
+      headers: { 'X-BX-APIKEY': API_KEY }
+    });
+
+    if (response.data?.code === 0 && response.data.data) {
+      const orders = Array.isArray(response.data.data) ? response.data.data : [response.data.data];
+      const tpslOrders = orders.filter(order => 
+        order.symbol === symbol &&
+        order.positionSide === positionSide &&
+        (order.type === 'TAKE_PROFIT_MARKET' || order.type === 'STOP_MARKET') &&
+        (order.status === 'NEW' || order.status === 'PARTIALLY_FILLED')
+      );
+      
+      console.log(`🔍 Encontradas ${tpslOrders.length} órdenes TP/SL para cancelar`);
+      
+      for (const order of tpslOrders) {
+        try {
+          const cancelPayload = { symbol, orderId: order.orderId };
+          const cancelTs = Date.now();
+          const cancelRaw = buildParams(cancelPayload, cancelTs, false);
+          const cancelSig = signParams(cancelRaw);
+          const cancelQp = buildParams(cancelPayload, cancelTs, true) + `&signature=${cancelSig}`;
+          const cancelUrl = `https://${HOST}/openApi/swap/v2/trade/order?${cancelQp}`;
+          
+          await fastAxios.delete(cancelUrl, {
+            headers: { 'X-BX-APIKEY': API_KEY }
+          });
+          
+          console.log(`✅ Cancelada orden ${order.type}: ${order.orderId}`);
+        } catch (e) {
+          console.log(`⚠️ Error cancelando orden ${order.orderId}:`, e.message);
+        }
+      }
+      
+      return tpslOrders.length;
+    }
+    
+    return 0;
+  } catch (error) {
+    console.error('❌ Error cancelando TP/SL:', error.message);
+    return 0;
+  }
+}
+
 // ================== OBTENER PRECIO REAL DE EJECUCIÓN ==================
 
 async function getOrderExecutionPrice(orderId, symbol, maxRetries = 10) {
@@ -129,7 +235,6 @@ async function getOrderExecutionPrice(orderId, symbol, maxRetries = 10) {
       if (response.data?.code === 0 && response.data.data) {
         const order = response.data.data;
         
-        // Verificar si la orden está completamente ejecutada
         if (order.status === 'FILLED' && order.avgPrice && parseFloat(order.avgPrice) > 0) {
           const avgPrice = parseFloat(order.avgPrice);
           const executedQty = parseFloat(order.executedQty || order.origQty);
@@ -144,7 +249,6 @@ async function getOrderExecutionPrice(orderId, symbol, maxRetries = 10) {
             orderId: order.orderId
           };
         } else if (order.status === 'PARTIALLY_FILLED' && order.avgPrice) {
-          // Si está parcialmente ejecutada, usar el precio promedio actual
           const avgPrice = parseFloat(order.avgPrice);
           const executedQty = parseFloat(order.executedQty);
           
@@ -161,7 +265,6 @@ async function getOrderExecutionPrice(orderId, symbol, maxRetries = 10) {
         }
       }
       
-      // Esperar antes del siguiente intento
       await new Promise(resolve => setTimeout(resolve, 500));
       
     } catch (error) {
@@ -174,10 +277,10 @@ async function getOrderExecutionPrice(orderId, symbol, maxRetries = 10) {
   return null;
 }
 
-// ================== ORDEN PRINCIPAL + TP/SL CORREGIDO ==================
+// ================== ORDEN PRINCIPAL + TP/SL CON REENTRADAS ==================
 
 async function placeOrderInternal(params) {
-  console.log('\n🚀 === PLACE ORDER INTERNAL (TP/SL CORREGIDO) ===');
+  console.log('\n🚀 === PLACE ORDER INTERNAL (CON REENTRADAS) ===');
   console.log('📋 Parámetros recibidos:', JSON.stringify(params, null, 2));
 
   const {
@@ -190,7 +293,7 @@ async function placeOrderInternal(params) {
     // TP/SL en porcentaje
     tpPercent,
     slPercent,
-    // TP/SL en precio absoluto (estos se usarán tal como vienen)
+    // TP/SL en precio absoluto
     tpPrice,
     slPrice,
     takeProfit,
@@ -204,18 +307,27 @@ async function placeOrderInternal(params) {
 
   console.log(`🎯 Symbol normalizado: ${rawSymbol} -> ${symbol}`);
 
-  // 1) Configurar leverage
+  // 1) CONSULTAR POSICIÓN EXISTENTE
+  const existingPosition = await getExistingPosition(symbol);
+  
+  // 2) Configurar leverage
   const posSide = side.toUpperCase() === 'BUY' ? 'LONG' : 'SHORT';
   const leverageResult = await setLeverage(symbol, leverage, posSide);
   
-  // 2) Obtener precio actual y info del contrato
+  // 3) Verificar compatibilidad de direcciones
+  if (existingPosition.exists && existingPosition.side !== posSide) {
+    console.log(`⚠️ ADVERTENCIA: Posición existente es ${existingPosition.side}, nueva orden es ${posSide}`);
+    console.log(`📊 Esto cerrará parcial o totalmente la posición existente`);
+  }
+  
+  // 4) Obtener precio actual y info del contrato
   const marketPrice = await getCurrentPrice(symbol);
   const contract = await getContractInfo(symbol);
   
   console.log(`💰 Precio de mercado: ${marketPrice}`);
   console.log(`📊 Contrato info:`, contract);
 
-  // 3) Calcular cantidad
+  // 5) Calcular cantidad
   let finalQuantity;
   if (quantity) {
     finalQuantity = Number(quantity);
@@ -229,19 +341,28 @@ async function placeOrderInternal(params) {
   
   console.log(`📏 Cantidad calculada: ${finalQuantity}`);
 
-  // 4) TP/SL absolutos (si vienen, se usan tal como están - NO se recalculan)
-  let absoluteTpPrice, absoluteSlPrice;
+  // 6) Determinar TP/SL a usar
+  let useNewTPSL = false;
+  let absoluteTpPrice, absoluteSlPrice, currentTpPercent, currentSlPercent;
   
-  if (tpPrice) absoluteTpPrice = Number(tpPrice);
-  else if (takeProfit) absoluteTpPrice = Number(takeProfit);
+  // Detectar si vienen nuevos TP/SL en la señal
+  if (tpPrice || takeProfit || tpPercent) {
+    useNewTPSL = true;
+    if (tpPrice) absoluteTpPrice = Number(tpPrice);
+    else if (takeProfit) absoluteTpPrice = Number(takeProfit);
+    else if (tpPercent) currentTpPercent = Number(tpPercent);
+  }
   
-  if (slPrice) absoluteSlPrice = Number(slPrice);
-  else if (stopLoss) absoluteSlPrice = Number(stopLoss);
+  if (slPrice || stopLoss || slPercent) {
+    useNewTPSL = true;
+    if (slPrice) absoluteSlPrice = Number(slPrice);
+    else if (stopLoss) absoluteSlPrice = Number(stopLoss);
+    else if (slPercent) currentSlPercent = Number(slPercent);
+  }
 
-  console.log(`🎯 TP absoluto: ${absoluteTpPrice || 'No configurado'}`);
-  console.log(`🛡️ SL absoluto: ${absoluteSlPrice || 'No configurado'}`);
+  console.log(`🎯 ¿Usar nuevos TP/SL?: ${useNewTPSL ? 'SÍ' : 'NO - mantener originales'}`);
 
-  // 5) EJECUTAR ORDEN PRINCIPAL
+  // 7) EJECUTAR ORDEN PRINCIPAL
   let mainPayload = {
     symbol,
     side: side.toUpperCase(),
@@ -292,7 +413,6 @@ async function placeOrderInternal(params) {
   console.log('📋 orderResp.data:', JSON.stringify(orderResp.data, null, 2));
   console.log('📋 orderResp.data?.data:', JSON.stringify(orderResp.data?.data, null, 2));
   
-  // Intentar múltiples formas de obtener el orderId
   let orderId = orderResp.data?.data?.orderId 
              || orderResp.data?.data?.order?.orderId
              || orderResp.data?.orderId
@@ -305,117 +425,148 @@ async function placeOrderInternal(params) {
     throw new Error(`No se obtuvo orderId. Estructura: ${JSON.stringify(orderResp.data)}`);
   }
 
-  // 6) OBTENER PRECIO REAL DE EJECUCIÓN
-  let realExecutionPrice = marketPrice; // Fallback
-  let executedQuantity = finalQuantity;
+  // 8) OBTENER PRECIO REAL DE EJECUCIÓN DE LA NUEVA ORDEN
+  let newExecutionPrice = marketPrice;
+  let newExecutedQuantity = finalQuantity;
   
-  if (tpPercent || slPercent) {
-    console.log('\n⏳ Intentando obtener precio real de ejecución...');
-    
-    // Primero intentar desde la respuesta directa (más rápido)
-    if (orderResp.data?.data?.order?.avgPrice && parseFloat(orderResp.data.data.order.avgPrice) > 0) {
-      realExecutionPrice = parseFloat(orderResp.data.data.order.avgPrice);
-      executedQuantity = parseFloat(orderResp.data.data.order.executedQty) || finalQuantity;
-      console.log(`✅ Precio real obtenido de respuesta directa: ${realExecutionPrice}`);
+  console.log('\n⏳ Obteniendo precio real de la nueva orden...');
+  
+  // Intentar desde la respuesta directa primero
+  if (orderResp.data?.data?.order?.avgPrice && parseFloat(orderResp.data.data.order.avgPrice) > 0) {
+    newExecutionPrice = parseFloat(orderResp.data.data.order.avgPrice);
+    newExecutedQuantity = parseFloat(orderResp.data.data.order.executedQty) || finalQuantity;
+    console.log(`✅ Precio real obtenido de respuesta directa: ${newExecutionPrice}`);
+  } else {
+    console.log('\n⏳ Consultando API para obtener precio real...');
+    const executionData = await getOrderExecutionPrice(orderId, symbol, 5);
+    if (executionData) {
+      newExecutionPrice = executionData.avgPrice;
+      newExecutedQuantity = executionData.executedQty;
+      console.log(`✅ Precio real obtenido de API: ${newExecutionPrice}`);
     } else {
-      // Si no está en la respuesta, consultar API
-      console.log('\n⏳ Consultando API para obtener precio real...');
-      const executionData = await getOrderExecutionPrice(orderId, symbol);
-      if (executionData) {
-        realExecutionPrice = executionData.avgPrice;
-        executedQuantity = executionData.executedQty;
-        console.log(`✅ Precio real obtenido de API: ${realExecutionPrice}`);
-      } else {
-        console.log(`⚠️ Usando precio de mercado como fallback: ${realExecutionPrice}`);
+      console.log(`⚠️ Usando precio de mercado como fallback: ${newExecutionPrice}`);
+    }
+  }
+
+  // 9) CALCULAR PRECIO PROMEDIO PONDERADO Y CANTIDAD TOTAL
+  let avgEntryPrice, totalQuantity;
+  
+  if (existingPosition.exists && existingPosition.side === posSide) {
+    // Reentrada - calcular promedio ponderado
+    const existingValue = existingPosition.size * existingPosition.entryPrice;
+    const newValue = newExecutedQuantity * newExecutionPrice;
+    totalQuantity = existingPosition.size + newExecutedQuantity;
+    avgEntryPrice = (existingValue + newValue) / totalQuantity;
+    
+    console.log('\n📊 === CÁLCULO DE REENTRADA ===');
+    console.log(`📈 Posición anterior: ${existingPosition.size} @ ${existingPosition.entryPrice}`);
+    console.log(`📈 Nueva entrada: ${newExecutedQuantity} @ ${newExecutionPrice}`);
+    console.log(`📊 Precio promedio ponderado: ${avgEntryPrice.toFixed(6)}`);
+    console.log(`📊 Cantidad total: ${totalQuantity}`);
+  } else {
+    // Primera entrada o cambio de dirección
+    avgEntryPrice = newExecutionPrice;
+    totalQuantity = newExecutedQuantity;
+    console.log(`📊 Nueva posición: ${totalQuantity} @ ${avgEntryPrice}`);
+  }
+
+  // 10) CONFIGURAR TP/SL SOLO SI CORRESPONDE
+  let tpOrder = null, slOrder = null;
+  let finalTpPrice, finalSlPrice;
+  
+  if (useNewTPSL || !existingPosition.exists) {
+    console.log('\n🎯 Configurando TP/SL...');
+    
+    // Cancelar TP/SL existentes si hay reentrada
+    if (existingPosition.exists && existingPosition.side === posSide) {
+      await cancelExistingTPSL(symbol, posSide);
+    }
+
+    // Calcular TP/SL sobre precio promedio
+    if (absoluteTpPrice) {
+      finalTpPrice = absoluteTpPrice;
+    } else if (currentTpPercent) {
+      finalTpPrice = posSide === 'LONG'
+        ? Number((avgEntryPrice * (1 + currentTpPercent / 100)).toFixed(6))
+        : Number((avgEntryPrice * (1 - currentTpPercent / 100)).toFixed(6));
+      console.log(`📈 TP calculado: ${avgEntryPrice} ${posSide === 'LONG' ? '+' : '-'} ${currentTpPercent}% = ${finalTpPrice}`);
+    }
+
+    if (absoluteSlPrice) {
+      finalSlPrice = absoluteSlPrice;
+    } else if (currentSlPercent) {
+      finalSlPrice = posSide === 'LONG'
+        ? Number((avgEntryPrice * (1 - currentSlPercent / 100)).toFixed(6))
+        : Number((avgEntryPrice * (1 + currentSlPercent / 100)).toFixed(6));
+      console.log(`🛡️ SL calculado: ${avgEntryPrice} ${posSide === 'LONG' ? '-' : '+'} ${currentSlPercent}% = ${finalSlPrice}`);
+    }
+
+    // Enviar TP
+    if (finalTpPrice) {
+      console.log('\n📈 Configurando Take Profit...');
+      const tpPayload = {
+        symbol,
+        side: posSide === 'LONG' ? 'SELL' : 'BUY',
+        positionSide: posSide,
+        type: 'TAKE_PROFIT_MARKET',
+        quantity: totalQuantity,
+        stopPrice: finalTpPrice,
+        workingType: 'MARK_PRICE'
+      };
+      
+      const ts2 = Date.now();
+      const raw2 = buildParams(tpPayload, ts2, false);
+      const sig2 = signParams(raw2);
+      const qp2 = buildParams(tpPayload, ts2, true) + `&signature=${sig2}`;
+      const tpUrl = `https://${HOST}/openApi/swap/v2/trade/order?${qp2}`;
+      
+      try {
+        console.log('📋 TP Payload:', tpPayload);
+        tpOrder = await fastAxios.post(tpUrl, null, { 
+          headers: { 'X-BX-APIKEY': API_KEY } 
+        });
+        console.log('📨 Respuesta TP:', JSON.stringify(tpOrder.data, null, 2));
+      } catch (e) {
+        console.error('❌ Error TP:', e.response?.data || e.message);
+        tpOrder = { data: { code: -1, msg: e.message } };
       }
     }
-  }
 
-  // 7) CALCULAR TP/SL BASADO EN PRECIO REAL
-  let finalTpPrice = absoluteTpPrice; // Si ya está definido, no se recalcula
-  let finalSlPrice = absoluteSlPrice;
-
-  // Solo calcular porcentajes si no hay precios absolutos
-  if (!finalTpPrice && tpPercent) {
-    const tpPerc = Number(tpPercent);
-    finalTpPrice = side.toUpperCase() === 'BUY'
-      ? Number((realExecutionPrice * (1 + tpPerc / 100)).toFixed(6))
-      : Number((realExecutionPrice * (1 - tpPerc / 100)).toFixed(6));
-    console.log(`📈 TP calculado con precio real: ${realExecutionPrice} + ${tpPerc}% = ${finalTpPrice}`);
-  }
-
-  if (!finalSlPrice && slPercent) {
-    const slPerc = Number(slPercent);
-    finalSlPrice = side.toUpperCase() === 'BUY'
-      ? Number((realExecutionPrice * (1 - slPerc / 100)).toFixed(6))
-      : Number((realExecutionPrice * (1 + slPerc / 100)).toFixed(6));
-    console.log(`🛡️ SL calculado con precio real: ${realExecutionPrice} - ${slPerc}% = ${finalSlPrice}`);
-  }
-
-  // 8) ENVIAR TP/SL CON PRECIOS CORRECTOS
-  let tpOrder = null;
-  if (finalTpPrice) {
-    console.log('\n📈 Configurando Take Profit con precio real...');
-    const tpPayload = {
-      symbol,
-      side: side.toUpperCase() === 'BUY' ? 'SELL' : 'BUY',
-      positionSide: posSide,
-      type: 'TAKE_PROFIT_MARKET',
-      quantity: executedQuantity,
-      stopPrice: finalTpPrice,
-      workingType: 'MARK_PRICE'
-    };
-    
-    const ts2 = Date.now();
-    const raw2 = buildParams(tpPayload, ts2, false);
-    const sig2 = signParams(raw2);
-    const qp2 = buildParams(tpPayload, ts2, true) + `&signature=${sig2}`;
-    const tpUrl = `https://${HOST}/openApi/swap/v2/trade/order?${qp2}`;
-    
-    try {
-      console.log('📋 TP Payload:', tpPayload);
-      tpOrder = await fastAxios.post(tpUrl, null, { 
-        headers: { 'X-BX-APIKEY': API_KEY } 
-      });
-      console.log('📨 Respuesta TP:', JSON.stringify(tpOrder.data, null, 2));
-    } catch (e) {
-      console.error('❌ Error TP:', e.response?.data || e.message);
-      tpOrder = { data: { code: -1, msg: e.message } };
+    // Enviar SL
+    if (finalSlPrice) {
+      console.log('\n🛡️ Configurando Stop Loss...');
+      const slPayload = {
+        symbol,
+        side: posSide === 'LONG' ? 'SELL' : 'BUY',
+        positionSide: posSide,
+        type: 'STOP_MARKET',
+        quantity: totalQuantity,
+        stopPrice: finalSlPrice,
+        workingType: 'MARK_PRICE'
+      };
+      
+      const ts3 = Date.now();
+      const raw3 = buildParams(slPayload, ts3, false);
+      const sig3 = signParams(raw3);
+      const qp3 = buildParams(slPayload, ts3, true) + `&signature=${sig3}`;
+      const slUrl = `https://${HOST}/openApi/swap/v2/trade/order?${qp3}`;
+      
+      try {
+        console.log('📋 SL Payload:', slPayload);
+        slOrder = await fastAxios.post(slUrl, null, { 
+          headers: { 'X-BX-APIKEY': API_KEY } 
+        });
+        console.log('📨 Respuesta SL:', JSON.stringify(slOrder.data, null, 2));
+      } catch (e) {
+        console.error('❌ Error SL:', e.response?.data || e.message);
+        slOrder = { data: { code: -1, msg: e.message } };
+      }
     }
+  } else {
+    console.log('\n📊 No se configuran nuevos TP/SL - manteniendo existentes');
   }
 
-  let slOrder = null;
-  if (finalSlPrice) {
-    console.log('\n🛡️ Configurando Stop Loss con precio real...');
-    const slPayload = {
-      symbol,
-      side: side.toUpperCase() === 'BUY' ? 'SELL' : 'BUY',
-      positionSide: posSide,
-      type: 'STOP_MARKET',
-      quantity: executedQuantity,
-      stopPrice: finalSlPrice,
-      workingType: 'MARK_PRICE'
-    };
-    
-    const ts3 = Date.now();
-    const raw3 = buildParams(slPayload, ts3, false);
-    const sig3 = signParams(raw3);
-    const qp3 = buildParams(slPayload, ts3, true) + `&signature=${sig3}`;
-    const slUrl = `https://${HOST}/openApi/swap/v2/trade/order?${qp3}`;
-    
-    try {
-      console.log('📋 SL Payload:', slPayload);
-      slOrder = await fastAxios.post(slUrl, null, { 
-        headers: { 'X-BX-APIKEY': API_KEY } 
-      });
-      console.log('📨 Respuesta SL:', JSON.stringify(slOrder.data, null, 2));
-    } catch (e) {
-      console.error('❌ Error SL:', e.response?.data || e.message);
-      slOrder = { data: { code: -1, msg: e.message } };
-    }
-  }
-
-  // 9) RESPUESTA FINAL
+  // 11) RESPUESTA FINAL
   const result = {
     code: orderResp.data?.code || -1,
     msg: orderResp.data?.msg || 'Error desconocido',
@@ -428,17 +579,29 @@ async function placeOrderInternal(params) {
       tpSuccess: tpOrder ? tpOrder.data?.code === 0 : null,
       slSuccess: slOrder ? slOrder.data?.code === 0 : null,
       leverageSet: leverageResult?.code === 0,
-      marketPrice: marketPrice,
-      realExecutionPrice: realExecutionPrice,
-      executedQuantity: executedQuantity,
+      isReentry: existingPosition.exists && existingPosition.side === posSide,
+      existingPosition: existingPosition.exists ? {
+        side: existingPosition.side,
+        size: existingPosition.size,
+        entryPrice: existingPosition.entryPrice
+      } : null,
+      newOrder: {
+        price: newExecutionPrice,
+        quantity: newExecutedQuantity
+      },
+      combinedPosition: {
+        avgEntryPrice: Number(avgEntryPrice.toFixed(6)),
+        totalQuantity: totalQuantity,
+        side: posSide
+      },
       takeProfit: finalTpPrice,
       stopLoss: finalSlPrice,
-      tpMethod: absoluteTpPrice ? 'Precio absoluto' : tpPercent ? 'Porcentaje sobre precio real' : 'No configurado',
-      slMethod: absoluteSlPrice ? 'Precio absoluto' : slPercent ? 'Porcentaje sobre precio real' : 'No configurado'
+      tpslStrategy: useNewTPSL ? 'Nuevos TP/SL aplicados' : 'Mantenidos existentes',
+      marketPrice: marketPrice
     }
   };
 
-  console.log('\n✅ === ORDEN COMPLETADA (TP/SL CORREGIDO) ===');
+  console.log('\n✅ === ORDEN COMPLETADA (CON REENTRADAS) ===');
   console.log('📊 Resumen:', JSON.stringify(result.summary, null, 2));
   
   return result;
