@@ -23,7 +23,6 @@ const fastAxios = axios.create({
   }
 });
 
-// Normaliza símbolos (BTCUSDT -> BTC-USDT)
 function normalizeSymbol(symbol) {
   if (!symbol) return symbol;
   let base = symbol.replace(/\.P$/, '');
@@ -33,7 +32,6 @@ function normalizeSymbol(symbol) {
   return base;
 }
 
-// Construye parámetros ordenados + timestamp
 function buildParams(payload, timestamp, urlEncode = false) {
   const clone = { ...payload };
   const keys = Object.keys(clone).sort();
@@ -44,14 +42,12 @@ function buildParams(payload, timestamp, urlEncode = false) {
   return str ? `${str}&timestamp=${timestamp}` : `timestamp=${timestamp}`;
 }
 
-// Firma la query
 function signParams(rawParams) {
   return crypto.createHmac('sha256', API_SECRET)
                .update(rawParams)
                .digest('hex');
 }
 
-// Cambia el leverage (GET, firmado)
 async function setLeverage(symbol, leverage = 5, side = 'LONG') {
   if (!API_KEY || !API_SECRET) throw new Error('API key/secret no configurados');
   const payload = { symbol, side, leverage };
@@ -73,7 +69,6 @@ async function setLeverage(symbol, leverage = 5, side = 'LONG') {
   }
 }
 
-// Precio de mercado actual
 async function getCurrentPrice(symbol) {
   const url = `https://${HOST}/openApi/swap/v2/quote/price?symbol=${symbol}`;
   const res = await fastAxios.get(url);
@@ -81,7 +76,6 @@ async function getCurrentPrice(symbol) {
   throw new Error(`Precio inválido: ${JSON.stringify(res.data)}`);
 }
 
-// Info contrato
 async function getContractInfo(symbol) {
   try {
     const url = `https://${HOST}/openApi/swap/v2/quote/contracts`;
@@ -285,7 +279,11 @@ async function placeOrderWithSmartRetry(params) {
   return result;
 }
 
-// Balance USDT
+// ------ ¡AQUÍ la definición de la función que exportas! ------
+async function placeOrder(params) {
+  return placeOrderWithSmartRetry(params);
+}
+
 async function getUSDTBalance() {
   if (!API_KEY || !API_SECRET) throw new Error('API key/secret no configurados');
   const ts = Date.now();
@@ -304,7 +302,6 @@ async function getUSDTBalance() {
   throw new Error(`Formato inesperado: ${JSON.stringify(data)}`);
 }
 
-// Cierra todas posiciones
 async function closeAllPositions(symbol) {
   const ts = Date.now();
   const sym = normalizeSymbol(symbol);
@@ -322,6 +319,7 @@ async function closeAllPositions(symbol) {
   }
 }
 
+// ---- EXPORT ----
 module.exports = {
   getUSDTBalance,
   placeOrder,
@@ -331,6 +329,7 @@ module.exports = {
   getContractInfo,
   closeAllPositions
 };
+
 
 
 
