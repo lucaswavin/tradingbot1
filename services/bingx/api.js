@@ -96,29 +96,28 @@ async function getContractInfo(symbol) {
   return { minOrderQty:0.001, tickSize:0.01, stepSize:0.001, minNotional:1 };
 }
 
-// --------- CREA ORDEN PLANIFICADA (SL/TP) ---------
-async function createPlanOrder({ symbol, positionSide, quantity, type, stopPrice }) {
+// -------- PLAN ORDER (SL/TP condicional) --------
+async function createPlanOrder({ symbol, side, positionSide, triggerPrice, type = 'STOP_MARKET', quantity }) {
+  const ts = Date.now();
   const payload = {
     symbol,
-    side: positionSide === 'LONG' ? 'SELL' : 'BUY', // SL/TP es opuesto a la posición
+    side,
     positionSide,
-    type, // "STOP_MARKET" o "TAKE_PROFIT_MARKET"
+    type, // "STOP_MARKET" para SL/TP market, "TAKE_PROFIT_MARKET" para TP
+    triggerPrice,
     quantity,
-    stopPrice,
-    workingType: 'MARK_PRICE'
+    workingType: "MARK_PRICE"
   };
-  const ts = Date.now();
   const raw = buildParams(payload, ts, false);
   const sig = signParams(raw);
   const qp = buildParams(payload, ts, true) + `&signature=${sig}`;
-  const url = `https://${HOST}/openApi/swap/v2/trade/planorder?${qp}`;
-
+  const url = `https://${HOST}/openApi/swap/v2/trade/planOrder?${qp}`;
   try {
-    console.log('🛡️ Enviando planorder:', payload);
+    console.log('🚨 Lanzando planOrder (SL/TP):', payload);
     const res = await fastAxios.post(url, null, {
       headers: { 'X-BX-APIKEY': API_KEY }
     });
-    console.log('📨 Planorder response:', res.data);
+    console.log('📨 Respuesta planOrder:', res.data);
     return res.data;
   } catch (err) {
     console.error('❌ Error createPlanOrder:', err.response?.data || err.message);
@@ -126,7 +125,7 @@ async function createPlanOrder({ symbol, positionSide, quantity, type, stopPrice
   }
 }
 
-// -------- ORDEN CORRECTA --------
+// -------- ORDEN PRINCIPAL --------
 async function placeOrderInternal({
   symbol,
   side,
@@ -175,7 +174,7 @@ async function placeOrderInternal({
       : +(price * (1 + Number(slPercent)/100)).toFixed(6);
   }
 
-  // 5) Construir payload según tipo de orden
+  // 5) Construir payload según tipo de orden principal
   let payload = {
     symbol,
     side: side.toUpperCase(),
@@ -190,7 +189,7 @@ async function placeOrderInternal({
     payload.timeInForce = 'GTC';
   }
 
-  // Trailing stop (BingX requiere parámetro adicional, consultar docs)
+  // Añadir trailing stop (BingX requiere parámetro adicional, consultar docs)
   if (trailingPercent) {
     payload.trailingStop = {
       type: "TRAILING_STOP_MARKET",
@@ -206,45 +205,55 @@ async function placeOrderInternal({
   const qp = buildParams(payload, ts, true) + `&signature=${sig}`;
   const url = `https://${HOST}/openApi/swap/v2/trade/order?${qp}`;
 
-  // 7) POST con body null (BingX exige query, NO body)
+  // 7) POST con body null (principal)
   let res;
   try {
-    console.log('🚀 placeOrderInternal =>', JSON.stringify({
-      symbol, side, leverage, usdtAmount, type, limitPrice, tpPercent, slPercent, tpPrice, slPrice, trailingPercent
-    }, null, 2));
+    console.log('🚀 placeOrderInternal =>', JSON.stringify({ symbol, side, leverage, usdtAmount, type, limitPrice, tpPercent, slPercent, tpPrice, slPrice, trailingPercent }, null, 2));
     console.log('📋 Orden (payload/query):', payload);
     console.log('🔗 URL:', url);
-    res = await fastAxios.post(url, null, {
-      headers: { 'X-BX-APIKEY': API_KEY }
-    });
+    res = await fastAxios.post(url, null, { headers: { 'X-BX-APIKEY': API_KEY } });
     console.log('📨 BingX response:', res.data);
   } catch (err) {
     console.error('❌ Error placeOrderInternal:', err.response?.data || err.message);
     throw err;
   }
 
-  // 8) Si hay TP/SL, crea órdenes planificadas (SOLO si orden principal fue ok)
-  if (res.data && res.data.code === 0 && (tpPercent || slPercent || tpPrice || slPrice)) {
-    const order = res.data.data?.order || {};
-    const qty = Number(order.quantity || order.executedQty || quantity);
-    // TAKE PROFIT
-    if (takeProfit) {
+  // =========== CREA PLANORDERS (SL/TP) SI SE PIDEN ===========
+  if (res.data?.order && (slPercent || slPrice || tpPercent || tpPrice)) {
+    const execQty = res.data.order.executedQty || payload.quantity;
+    const posSideForPlan = payload.positionSide;
+    // SL
+    if (slPercent || slPrice) {
+      let sl = slPrice;
+      if (slPercent) {
+        sl = side.toUpperCase() === 'BUY'
+          ? +(price * (1 - Number(slPercent) / 100)).toFixed(6)
+          : +(price * (1 + Number(slPercent) / 100)).toFixed(6);
+      }
       await createPlanOrder({
         symbol,
-        positionSide: posSide,
-        quantity: qty,
-        type: "TAKE_PROFIT_MARKET",
-        stopPrice: takeProfit
+        side: side.toUpperCase() === 'BUY' ? 'SELL' : 'BUY', // Contrario
+        positionSide: posSideForPlan,
+        triggerPrice: sl,
+        type: 'STOP_MARKET',
+        quantity: execQty
       });
     }
-    // STOP LOSS
-    if (stopLoss) {
+    // TP
+    if (tpPercent || tpPrice) {
+      let tp = tpPrice;
+      if (tpPercent) {
+        tp = side.toUpperCase() === 'BUY'
+          ? +(price * (1 + Number(tpPercent) / 100)).toFixed(6)
+          : +(price * (1 - Number(tpPercent) / 100)).toFixed(6);
+      }
       await createPlanOrder({
         symbol,
-        positionSide: posSide,
-        quantity: qty,
-        type: "STOP_MARKET",
-        stopPrice: stopLoss
+        side: side.toUpperCase() === 'BUY' ? 'SELL' : 'BUY', // Contrario
+        positionSide: posSideForPlan,
+        triggerPrice: tp,
+        type: 'TAKE_PROFIT_MARKET',
+        quantity: execQty
       });
     }
   }
