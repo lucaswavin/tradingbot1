@@ -96,6 +96,36 @@ async function getContractInfo(symbol) {
   return { minOrderQty:0.001, tickSize:0.01, stepSize:0.001, minNotional:1 };
 }
 
+// --------- CREA ORDEN PLANIFICADA (SL/TP) ---------
+async function createPlanOrder({ symbol, positionSide, quantity, type, stopPrice }) {
+  const payload = {
+    symbol,
+    side: positionSide === 'LONG' ? 'SELL' : 'BUY', // SL/TP es opuesto a la posición
+    positionSide,
+    type, // "STOP_MARKET" o "TAKE_PROFIT_MARKET"
+    quantity,
+    stopPrice,
+    workingType: 'MARK_PRICE'
+  };
+  const ts = Date.now();
+  const raw = buildParams(payload, ts, false);
+  const sig = signParams(raw);
+  const qp = buildParams(payload, ts, true) + `&signature=${sig}`;
+  const url = `https://${HOST}/openApi/swap/v2/trade/planorder?${qp}`;
+
+  try {
+    console.log('🛡️ Enviando planorder:', payload);
+    const res = await fastAxios.post(url, null, {
+      headers: { 'X-BX-APIKEY': API_KEY }
+    });
+    console.log('📨 Planorder response:', res.data);
+    return res.data;
+  } catch (err) {
+    console.error('❌ Error createPlanOrder:', err.response?.data || err.message);
+    throw err;
+  }
+}
+
 // -------- ORDEN CORRECTA --------
 async function placeOrderInternal({
   symbol,
@@ -160,10 +190,6 @@ async function placeOrderInternal({
     payload.timeInForce = 'GTC';
   }
 
-  // Añadir TP/SL si se han calculado
-  if (takeProfit) payload.takeProfit = takeProfit.toString();
-  if (stopLoss) payload.stopLoss = stopLoss.toString();
-
   // Trailing stop (BingX requiere parámetro adicional, consultar docs)
   if (trailingPercent) {
     payload.trailingStop = {
@@ -181,21 +207,49 @@ async function placeOrderInternal({
   const url = `https://${HOST}/openApi/swap/v2/trade/order?${qp}`;
 
   // 7) POST con body null (BingX exige query, NO body)
+  let res;
   try {
     console.log('🚀 placeOrderInternal =>', JSON.stringify({
       symbol, side, leverage, usdtAmount, type, limitPrice, tpPercent, slPercent, tpPrice, slPrice, trailingPercent
     }, null, 2));
     console.log('📋 Orden (payload/query):', payload);
     console.log('🔗 URL:', url);
-    const res = await fastAxios.post(url, null, {
+    res = await fastAxios.post(url, null, {
       headers: { 'X-BX-APIKEY': API_KEY }
     });
     console.log('📨 BingX response:', res.data);
-    return res.data;
   } catch (err) {
     console.error('❌ Error placeOrderInternal:', err.response?.data || err.message);
     throw err;
   }
+
+  // 8) Si hay TP/SL, crea órdenes planificadas (SOLO si orden principal fue ok)
+  if (res.data && res.data.code === 0 && (tpPercent || slPercent || tpPrice || slPrice)) {
+    const order = res.data.data?.order || {};
+    const qty = Number(order.quantity || order.executedQty || quantity);
+    // TAKE PROFIT
+    if (takeProfit) {
+      await createPlanOrder({
+        symbol,
+        positionSide: posSide,
+        quantity: qty,
+        type: "TAKE_PROFIT_MARKET",
+        stopPrice: takeProfit
+      });
+    }
+    // STOP LOSS
+    if (stopLoss) {
+      await createPlanOrder({
+        symbol,
+        positionSide: posSide,
+        quantity: qty,
+        type: "STOP_MARKET",
+        stopPrice: stopLoss
+      });
+    }
+  }
+
+  return res.data;
 }
 
 // Retry mínimo inteligente
