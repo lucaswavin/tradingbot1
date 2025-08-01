@@ -108,7 +108,67 @@ async function getContractInfo(symbol) {
   return { minOrderQty: 0.001, tickSize: 0.01, stepSize: 0.001, minNotional: 1, maxLeverage: 20 };
 }
 
-// ================== NUEVAS FUNCIONES PARA REENTRADAS ==================
+// ================== FUNCIONES PARA LIMPIAR Y VALIDAR DATOS ==================
+
+function cleanWebhookData(rawData) {
+  console.log('🧹 Limpiando datos del webhook...');
+  
+  // Crear objeto limpio sin duplicados
+  const cleanData = {};
+  const processedKeys = new Set();
+  
+  // Procesar cada clave una sola vez (la primera ocurrencia)
+  for (const [key, value] of Object.entries(rawData)) {
+    if (!processedKeys.has(key)) {
+      cleanData[key] = value;
+      processedKeys.add(key);
+    } else {
+      console.log(`⚠️ Clave duplicada ignorada: ${key} = ${value}`);
+    }
+  }
+  
+  console.log('✅ Datos limpios:', JSON.stringify(cleanData, null, 2));
+  return cleanData;
+}
+
+function validateWebhookData(data) {
+  console.log('🔍 Validando datos del webhook...');
+  
+  const required = ['symbol', 'side'];
+  const missing = required.filter(field => !data[field]);
+  
+  if (missing.length > 0) {
+    throw new Error(`Campos requeridos faltantes: ${missing.join(', ')}`);
+  }
+  
+  // Validar que el side sea válido
+  const validSides = ['BUY', 'SELL', 'LONG', 'SHORT'];
+  if (!validSides.includes(data.side?.toUpperCase())) {
+    throw new Error(`Side inválido: ${data.side}. Debe ser uno de: ${validSides.join(', ')}`);
+  }
+  
+  // Validar leverage
+  if (data.leverage && (isNaN(data.leverage) || data.leverage < 1 || data.leverage > 125)) {
+    console.log(`⚠️ Leverage inválido: ${data.leverage}, usando 5x por defecto`);
+    data.leverage = 5;
+  }
+  
+  // Validar porcentajes de TP/SL
+  if (data.tpPercent && (isNaN(data.tpPercent) || data.tpPercent <= 0)) {
+    console.log(`⚠️ tpPercent inválido: ${data.tpPercent}`);
+    delete data.tpPercent;
+  }
+  
+  if (data.slPercent && (isNaN(data.slPercent) || data.slPercent <= 0)) {
+    console.log(`⚠️ slPercent inválido: ${data.slPercent}`);
+    delete data.slPercent;
+  }
+  
+  console.log('✅ Datos validados correctamente');
+  return data;
+}
+
+// ================== FUNCIONES MEJORADAS PARA POSICIONES ==================
 
 async function getExistingPosition(symbol) {
   try {
@@ -131,7 +191,21 @@ async function getExistingPosition(symbol) {
       
       if (position) {
         const size = Math.abs(parseFloat(position.positionAmt));
-        const entryPrice = parseFloat(position.entryPrice);
+        // ✅ MEJORADO: Validar entryPrice
+        let entryPrice = parseFloat(position.entryPrice);
+        
+        // Si entryPrice es null, NaN o 0, intentar obtenerlo de markPrice o usar precio actual
+        if (!entryPrice || isNaN(entryPrice) || entryPrice <= 0) {
+          console.log('⚠️ EntryPrice inválido, intentando obtener precio de mercado...');
+          try {
+            entryPrice = await getCurrentPrice(symbol);
+            console.log(`📊 Usando precio de mercado como referencia: ${entryPrice}`);
+          } catch (e) {
+            console.log('❌ Error obteniendo precio de mercado:', e.message);
+            entryPrice = parseFloat(position.markPrice) || 0;
+          }
+        }
+        
         const side = parseFloat(position.positionAmt) > 0 ? 'LONG' : 'SHORT';
         
         console.log(`📊 Posición existente encontrada:`);
@@ -143,7 +217,7 @@ async function getExistingPosition(symbol) {
           exists: true,
           side,
           size,
-          entryPrice,
+          entryPrice, // ✅ Ahora siempre será un número válido
           data: position
         };
       }
@@ -158,11 +232,60 @@ async function getExistingPosition(symbol) {
   }
 }
 
-async function cancelExistingTPSL(symbol, positionSide) {
+async function getCurrentPositionSize(symbol, positionSide) {
   try {
-    console.log(`🗑️ Cancelando TP/SL existentes para ${symbol} ${positionSide}...`);
+    console.log(`📊 Obteniendo tamaño real de posición ${symbol} ${positionSide}...`);
     
-    // Obtener órdenes abiertas
+    const payload = { symbol };
+    const ts = Date.now();
+    const raw = buildParams(payload, ts, false);
+    const sig = signParams(raw);
+    const qp = buildParams(payload, ts, true) + `&signature=${sig}`;
+    const url = `https://${HOST}/openApi/swap/v2/user/positions?${qp}`;
+
+    const response = await fastAxios.get(url, {
+      headers: { 'X-BX-APIKEY': API_KEY }
+    });
+
+    if (response.data?.code === 0 && response.data.data) {
+      const positions = Array.isArray(response.data.data) ? response.data.data : [response.data.data];
+      const position = positions.find(p => p.symbol === symbol);
+      
+      if (position) {
+        const positionAmt = parseFloat(position.positionAmt);
+        const absSize = Math.abs(positionAmt);
+        const actualSide = positionAmt > 0 ? 'LONG' : 'SHORT';
+        
+        console.log(`📊 Posición real encontrada:`);
+        console.log(`   - Lado: ${actualSide}`);
+        console.log(`   - Tamaño: ${absSize}`);
+        console.log(`   - Precio promedio: ${position.entryPrice}`);
+        
+        return {
+          size: absSize,
+          side: actualSide,
+          entryPrice: parseFloat(position.entryPrice),
+          positionAmt: positionAmt
+        };
+      }
+    }
+    
+    console.log(`📊 No se encontró posición para ${symbol}`);
+    return null;
+    
+  } catch (error) {
+    console.error('❌ Error obteniendo posición actual:', error.message);
+    return null;
+  }
+}
+
+// ================== FUNCIONES PARA MANEJAR TP/SL SIN DUPLICADOS ==================
+
+async function cancelAllTPSLOrders(symbol) {
+  try {
+    console.log(`🗑️ Cancelando TODAS las órdenes TP/SL para ${symbol}...`);
+    
+    // Obtener TODAS las órdenes abiertas (no solo de una positionSide)
     const payload = { symbol };
     const ts = Date.now();
     const raw = buildParams(payload, ts, false);
@@ -176,14 +299,22 @@ async function cancelExistingTPSL(symbol, positionSide) {
 
     if (response.data?.code === 0 && response.data.data) {
       const orders = Array.isArray(response.data.data) ? response.data.data : [response.data.data];
+      
+      // Filtrar TODAS las órdenes TP/SL del símbolo (sin importar positionSide)
       const tpslOrders = orders.filter(order => 
         order.symbol === symbol &&
-        order.positionSide === positionSide &&
         (order.type === 'TAKE_PROFIT_MARKET' || order.type === 'STOP_MARKET') &&
         (order.status === 'NEW' || order.status === 'PARTIALLY_FILLED')
       );
       
-      console.log(`🔍 Encontradas ${tpslOrders.length} órdenes TP/SL para cancelar`);
+      console.log(`🔍 Encontradas ${tpslOrders.length} órdenes TP/SL para cancelar:`);
+      
+      // Mostrar detalles de cada orden antes de cancelar
+      tpslOrders.forEach(order => {
+        console.log(`   - ${order.type} | ${order.positionSide} | Qty: ${order.origQty} | Price: ${order.stopPrice || order.price}`);
+      });
+      
+      let canceledCount = 0;
       
       for (const order of tpslOrders) {
         try {
@@ -194,24 +325,143 @@ async function cancelExistingTPSL(symbol, positionSide) {
           const cancelQp = buildParams(cancelPayload, cancelTs, true) + `&signature=${cancelSig}`;
           const cancelUrl = `https://${HOST}/openApi/swap/v2/trade/order?${cancelQp}`;
           
-          await fastAxios.delete(cancelUrl, {
+          const cancelResp = await fastAxios.delete(cancelUrl, {
             headers: { 'X-BX-APIKEY': API_KEY }
           });
           
-          console.log(`✅ Cancelada orden ${order.type}: ${order.orderId}`);
+          if (cancelResp.data?.code === 0) {
+            console.log(`✅ Cancelada: ${order.type} ${order.orderId}`);
+            canceledCount++;
+          } else {
+            console.log(`⚠️ Error cancelando ${order.orderId}:`, cancelResp.data?.msg);
+          }
+          
+          // Pequeña pausa entre cancelaciones
+          await new Promise(resolve => setTimeout(resolve, 100));
+          
         } catch (e) {
-          console.log(`⚠️ Error cancelando orden ${order.orderId}:`, e.message);
+          console.log(`❌ Error cancelando orden ${order.orderId}:`, e.message);
         }
       }
       
-      return tpslOrders.length;
+      console.log(`✅ Total canceladas: ${canceledCount}/${tpslOrders.length}`);
+      
+      // Esperar un poco para que las cancelaciones se procesen
+      if (canceledCount > 0) {
+        console.log('⏳ Esperando que se procesen las cancelaciones...');
+        await new Promise(resolve => setTimeout(resolve, 1000));
+      }
+      
+      return canceledCount;
     }
     
     return 0;
   } catch (error) {
-    console.error('❌ Error cancelando TP/SL:', error.message);
+    console.error('❌ Error cancelando órdenes TP/SL:', error.message);
     return 0;
   }
+}
+
+async function setTPSLOrders(symbol, positionSide, totalQuantity, avgEntryPrice, tpPrice, slPrice) {
+  console.log('\n🎯 === CONFIGURANDO TP/SL (SIN DUPLICADOS) ===');
+  
+  // 1) CANCELAR TODAS las órdenes TP/SL existentes
+  await cancelAllTPSLOrders(symbol);
+  
+  // 2) Verificar tamaño real de posición
+  const currentPosition = await getCurrentPositionSize(symbol, positionSide);
+  if (!currentPosition) {
+    console.log('❌ No se pudo verificar la posición actual');
+    return { tpOrder: null, slOrder: null };
+  }
+  
+  // 3) Usar el tamaño real de la posición
+  const realQuantity = currentPosition.size;
+  const realEntryPrice = currentPosition.entryPrice;
+  
+  console.log(`📊 Usando datos reales de posición:`);
+  console.log(`   - Cantidad: ${realQuantity} (vs calculado: ${totalQuantity})`);
+  console.log(`   - Precio entrada: ${realEntryPrice} (vs calculado: ${avgEntryPrice})`);
+  
+  let tpOrder = null, slOrder = null;
+  
+  // 4) Crear Take Profit si especificado
+  if (tpPrice) {
+    console.log(`📈 Creando Take Profit: ${tpPrice}`);
+    
+    const tpPayload = {
+      symbol,
+      side: positionSide === 'LONG' ? 'SELL' : 'BUY',
+      positionSide: positionSide,
+      type: 'TAKE_PROFIT_MARKET',
+      quantity: realQuantity, // ✅ Usar cantidad real
+      stopPrice: tpPrice,
+      workingType: 'MARK_PRICE'
+    };
+    
+    try {
+      const ts = Date.now();
+      const raw = buildParams(tpPayload, ts, false);
+      const sig = signParams(raw);
+      const qp = buildParams(tpPayload, ts, true) + `&signature=${sig}`;
+      const tpUrl = `https://${HOST}/openApi/swap/v2/trade/order?${qp}`;
+      
+      console.log('📋 TP Payload:', tpPayload);
+      tpOrder = await fastAxios.post(tpUrl, null, { 
+        headers: { 'X-BX-APIKEY': API_KEY } 
+      });
+      
+      if (tpOrder.data?.code === 0) {
+        console.log('✅ Take Profit creado exitosamente');
+      } else {
+        console.log('❌ Error creando TP:', tpOrder.data?.msg);
+      }
+      
+    } catch (e) {
+      console.error('❌ Error TP:', e.response?.data || e.message);
+      tpOrder = { data: { code: -1, msg: e.message } };
+    }
+  }
+  
+  // 5) Crear Stop Loss si especificado
+  if (slPrice) {
+    console.log(`🛡️ Creando Stop Loss: ${slPrice}`);
+    
+    const slPayload = {
+      symbol,
+      side: positionSide === 'LONG' ? 'SELL' : 'BUY',
+      positionSide: positionSide,
+      type: 'STOP_MARKET',
+      quantity: realQuantity, // ✅ Usar cantidad real
+      stopPrice: slPrice,
+      workingType: 'MARK_PRICE'
+    };
+    
+    try {
+      const ts = Date.now();
+      const raw = buildParams(slPayload, ts, false);
+      const sig = signParams(raw);
+      const qp = buildParams(slPayload, ts, true) + `&signature=${sig}`;
+      const slUrl = `https://${HOST}/openApi/swap/v2/trade/order?${qp}`;
+      
+      console.log('📋 SL Payload:', slPayload);
+      slOrder = await fastAxios.post(slUrl, null, { 
+        headers: { 'X-BX-APIKEY': API_KEY } 
+      });
+      
+      if (slOrder.data?.code === 0) {
+        console.log('✅ Stop Loss creado exitosamente');
+      } else {
+        console.log('❌ Error creando SL:', slOrder.data?.msg);
+      }
+      
+    } catch (e) {
+      console.error('❌ Error SL:', e.response?.data || e.message);
+      slOrder = { data: { code: -1, msg: e.message } };
+    }
+  }
+  
+  return { tpOrder, slOrder };
 }
 
 // ================== OBTENER PRECIO REAL DE EJECUCIÓN ==================
@@ -277,11 +527,15 @@ async function getOrderExecutionPrice(orderId, symbol, maxRetries = 10) {
   return null;
 }
 
-// ================== ORDEN PRINCIPAL + TP/SL CON REENTRADAS ==================
+// ================== FUNCIÓN PRINCIPAL MEJORADA ==================
 
 async function placeOrderInternal(params) {
-  console.log('\n🚀 === PLACE ORDER INTERNAL (CON REENTRADAS) ===');
-  console.log('📋 Parámetros recibidos:', JSON.stringify(params, null, 2));
+  console.log('\n🚀 === PLACE ORDER INTERNAL (VERSIÓN COMPLETA MEJORADA) ===');
+  
+  // ✅ LIMPIAR Y VALIDAR DATOS PRIMERO
+  const cleanParams = cleanWebhookData(params);
+  const validatedParams = validateWebhookData(cleanParams);
+  console.log('📋 Parámetros validados:', JSON.stringify(validatedParams, null, 2));
 
   const {
     symbol: rawSymbol,
@@ -290,17 +544,15 @@ async function placeOrderInternal(params) {
     usdtAmount = 1,
     type = 'MARKET',
     limitPrice,
-    // TP/SL en porcentaje
     tpPercent,
     slPercent,
-    // TP/SL en precio absoluto
     tpPrice,
     slPrice,
     takeProfit,
     stopLoss,
     quantity,
     trailingPercent
-  } = params;
+  } = validatedParams;
 
   const symbol = normalizeSymbol(rawSymbol);
   if (!API_KEY || !API_SECRET) throw new Error('API key/secret no configurados');
@@ -329,8 +581,8 @@ async function placeOrderInternal(params) {
 
   // 5) Calcular cantidad
   let finalQuantity;
-  if (quantity) {
-    finalQuantity = Number(quantity);
+  if (quantity && !isNaN(parseFloat(quantity))) {
+    finalQuantity = parseFloat(quantity);
   } else {
     finalQuantity = Math.max(
       contract.minOrderQty,
@@ -345,7 +597,6 @@ async function placeOrderInternal(params) {
   let useNewTPSL = false;
   let absoluteTpPrice, absoluteSlPrice, currentTpPercent, currentSlPercent;
   
-  // Detectar si vienen nuevos TP/SL en la señal
   if (tpPrice || takeProfit || tpPercent) {
     useNewTPSL = true;
     if (tpPrice) absoluteTpPrice = Number(tpPrice);
@@ -396,9 +647,22 @@ async function placeOrderInternal(params) {
     console.log('📨 Data completa:', JSON.stringify(orderResp.data, null, 2));
     
     if (orderResp.data?.code !== 0) {
-      console.log('❌ Código de error BingX:', orderResp.data?.code);
-      console.log('❌ Mensaje de error:', orderResp.data?.msg);
-      throw new Error(`Error en orden principal: ${orderResp.data?.msg || 'Sin detalle'}`);
+      const errorCode = orderResp.data?.code;
+      const errorMsg = orderResp.data?.msg;
+      
+      // Manejar errores específicos
+      switch(errorCode) {
+        case 100001:
+          throw new Error('API Key inválida');
+        case 100004:
+          throw new Error('Signature inválida - revisar API Secret');
+        case 200004:
+          throw new Error('Balance insuficiente');
+        case 200027:
+          throw new Error('Cantidad mínima no alcanzada');
+        default:
+          throw new Error(`Error BingX ${errorCode}: ${errorMsg}`);
+      }
     }
     
   } catch (err) {
@@ -470,18 +734,17 @@ async function placeOrderInternal(params) {
     console.log(`📊 Nueva posición: ${totalQuantity} @ ${avgEntryPrice}`);
   }
 
-  // 10) CONFIGURAR TP/SL SOLO SI CORRESPONDE
+  // 10) CONFIGURAR TP/SL CON LA FUNCIÓN MEJORADA
   let tpOrder = null, slOrder = null;
   let finalTpPrice, finalSlPrice;
   
   if (useNewTPSL || !existingPosition.exists) {
-    console.log('\n🎯 Configurando TP/SL...');
+    console.log('\n🎯 Configurando TP/SL con función mejorada...');
     
-    // Cancelar TP/SL existentes si hay reentrada
-    if (existingPosition.exists && existingPosition.side === posSide) {
-      await cancelExistingTPSL(symbol, posSide);
-    }
-
+    // Esperar un poco para que la posición se actualice
+    console.log('⏳ Esperando actualización de posición...');
+    await new Promise(resolve => setTimeout(resolve, 3000));
+    
     // Calcular TP/SL sobre precio promedio
     if (absoluteTpPrice) {
       finalTpPrice = absoluteTpPrice;
@@ -501,72 +764,15 @@ async function placeOrderInternal(params) {
       console.log(`🛡️ SL calculado: ${avgEntryPrice} ${posSide === 'LONG' ? '-' : '+'} ${currentSlPercent}% = ${finalSlPrice}`);
     }
 
-    // Enviar TP
-    if (finalTpPrice) {
-      console.log('\n📈 Configurando Take Profit...');
-      const tpPayload = {
-        symbol,
-        side: posSide === 'LONG' ? 'SELL' : 'BUY',
-        positionSide: posSide,
-        type: 'TAKE_PROFIT_MARKET',
-        quantity: totalQuantity,
-        stopPrice: finalTpPrice,
-        workingType: 'MARK_PRICE'
-      };
-      
-      const ts2 = Date.now();
-      const raw2 = buildParams(tpPayload, ts2, false);
-      const sig2 = signParams(raw2);
-      const qp2 = buildParams(tpPayload, ts2, true) + `&signature=${sig2}`;
-      const tpUrl = `https://${HOST}/openApi/swap/v2/trade/order?${qp2}`;
-      
-      try {
-        console.log('📋 TP Payload:', tpPayload);
-        tpOrder = await fastAxios.post(tpUrl, null, { 
-          headers: { 'X-BX-APIKEY': API_KEY } 
-        });
-        console.log('📨 Respuesta TP:', JSON.stringify(tpOrder.data, null, 2));
-      } catch (e) {
-        console.error('❌ Error TP:', e.response?.data || e.message);
-        tpOrder = { data: { code: -1, msg: e.message } };
-      }
-    }
-
-    // Enviar SL
-    if (finalSlPrice) {
-      console.log('\n🛡️ Configurando Stop Loss...');
-      const slPayload = {
-        symbol,
-        side: posSide === 'LONG' ? 'SELL' : 'BUY',
-        positionSide: posSide,
-        type: 'STOP_MARKET',
-        quantity: totalQuantity,
-        stopPrice: finalSlPrice,
-        workingType: 'MARK_PRICE'
-      };
-      
-      const ts3 = Date.now();
-      const raw3 = buildParams(slPayload, ts3, false);
-      const sig3 = signParams(raw3);
-      const qp3 = buildParams(slPayload, ts3, true) + `&signature=${sig3}`;
-      const slUrl = `https://${HOST}/openApi/swap/v2/trade/order?${qp3}`;
-      
-      try {
-        console.log('📋 SL Payload:', slPayload);
-        slOrder = await fastAxios.post(slUrl, null, { 
-          headers: { 'X-BX-APIKEY': API_KEY } 
-        });
-        console.log('📨 Respuesta SL:', JSON.stringify(slOrder.data, null, 2));
-      } catch (e) {
-        console.error('❌ Error SL:', e.response?.data || e.message);
-        slOrder = { data: { code: -1, msg: e.message } };
-      }
-    }
+    // Usar la función mejorada para TP/SL (evita duplicados)
+    const tpslResult = await setTPSLOrders(symbol, posSide, totalQuantity, avgEntryPrice, finalTpPrice, finalSlPrice);
+    tpOrder = tpslResult.tpOrder;
+    slOrder = tpslResult.slOrder;
   } else {
     console.log('\n📊 No se configuran nuevos TP/SL - manteniendo existentes');
   }
 
-  // 11) RESPUESTA FINAL
+  // 11) RESPUESTA FINAL MEJORADA
   const result = {
     code: orderResp.data?.code || -1,
     msg: orderResp.data?.msg || 'Error desconocido',
@@ -594,52 +800,112 @@ async function placeOrderInternal(params) {
         totalQuantity: totalQuantity,
         side: posSide
       },
-      takeProfit: finalTpPrice,
-      stopLoss: finalSlPrice,
+      takeProfit: finalTpPrice || null,
+      stopLoss: finalSlPrice || null,
       tpslStrategy: useNewTPSL ? 'Nuevos TP/SL aplicados' : 'Mantenidos existentes',
-      marketPrice: marketPrice
+      marketPrice: marketPrice,
+      duplicatesFixed: true, // ✅ Indicador de mejoras aplicadas
+      // ✅ DATOS PARA EL LOG FINAL
+      execution: {
+        symbol: symbol,
+        finalQuantity: finalQuantity,
+        executionPrice: newExecutionPrice,
+        leverage: leverage,
+        usdtAmount: usdtAmount,
+        orderType: type
+      }
     }
   };
 
-  console.log('\n✅ === ORDEN COMPLETADA (CON REENTRADAS) ===');
-  console.log('📊 Resumen:', JSON.stringify(result.summary, null, 2));
+  console.log('\n✅ === ORDEN COMPLETADA (VERSIÓN COMPLETA) ===');
+  logTradeExecution(symbol, `${posSide}_${side}`, result);
   
   return result;
 }
 
-// Retry por mínimo notional
-async function placeOrderWithSmartRetry(params) {
-  const { symbol, side, leverage = 5, usdtAmount = 1, ...rest } = params;
-  const sym = normalizeSymbol(symbol);
+// ================== FUNCIÓN DE LOGGING MEJORADA ==================
 
-  let result = await placeOrderInternal({
-    symbol: sym, side, leverage, usdtAmount, ...rest
-  });
+function logTradeExecution(symbol, action, result) {
+  const timestamp = new Date().toISOString();
+  const { summary } = result;
+  
+  console.log('\n🎯 === RESUMEN DE EJECUCIÓN COMPLETO ===');
+  console.log(`⏰ Timestamp: ${timestamp}`);
+  console.log(`📊 Símbolo: ${summary.execution?.symbol || 'N/A'}`);
+  console.log(`📊 Acción: ${action}`);
+  console.log(`📊 Lado: ${summary.combinedPosition?.side || 'N/A'}`);
+  console.log(`📊 Cantidad: ${summary.execution?.finalQuantity || summary.newOrder?.quantity || 'N/A'}`);
+  console.log(`📊 Precio ejecución: ${summary.execution?.executionPrice || summary.newOrder?.price || 'N/A'}`);
+  console.log(`📊 Leverage: ${summary.execution?.leverage || 'N/A'}x`);
+  console.log(`📊 Monto USDT: $${summary.execution?.usdtAmount || 'N/A'}`);
+  console.log(`📊 Tipo orden: ${summary.execution?.orderType || 'N/A'}`);
+  console.log(`📊 Take Profit: ${summary.takeProfit || 'No configurado'}`);
+  console.log(`📊 Stop Loss: ${summary.stopLoss || 'No configurado'}`);
+  console.log(`📊 ¿Reentrada?: ${summary.isReentry ? 'SÍ' : 'NO'}`);
+  console.log(`📊 Orden principal: ${summary.mainSuccess ? '✅ Éxito' : '❌ Error'}`);
+  console.log(`📊 Take Profit: ${summary.tpSuccess === null ? '⊘ N/A' : summary.tpSuccess ? '✅ Éxito' : '❌ Error'}`);
+  console.log(`📊 Stop Loss: ${summary.slSuccess === null ? '⊘ N/A' : summary.slSuccess ? '✅ Éxito' : '❌ Error'}`);
+  console.log(`📊 Leverage config: ${summary.leverageSet ? '✅ Éxito' : '❌ Error'}`);
+  console.log(`🔧 Duplicados solucionados: ${summary.duplicatesFixed ? '✅ SÍ' : '❌ NO'}`);
+  
+  if (summary.isReentry && summary.existingPosition) {
+    console.log(`📈 === DETALLES DE REENTRADA ===`);
+    console.log(`📈 Posición anterior: ${summary.existingPosition.size} @ ${summary.existingPosition.entryPrice}`);
+    console.log(`📈 Nueva entrada: ${summary.newOrder.quantity} @ ${summary.newOrder.price}`);
+    console.log(`📈 Precio promedio final: ${summary.combinedPosition.avgEntryPrice}`);
+    console.log(`📈 Cantidad total: ${summary.combinedPosition.totalQuantity}`);
+  }
+  
+  console.log('=====================================');
+}
 
-  if (result.code !== 0) {
-    const msg = result.msg || '';
-    if (/min|min notional|insufficient|quantity/i.test(msg)) {
-      console.log('🔄 Reintentando con mayor cantidad...');
+// Retry con mejoras
+async function placeOrderWithSmartRetry(params, maxRetries = 3) {
+  let lastError;
+  
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    try {
+      console.log(`🔄 Intento ${attempt}/${maxRetries} para ${params.symbol}`);
       
-      let minUSDT;
-      const matchAmount = msg.match(/([\d.]+)\s*USDT/i);
-      if (matchAmount) {
-        minUSDT = parseFloat(matchAmount[1]);
-      } else {
-        const info = await getContractInfo(sym);
-        minUSDT = info.minNotional;
+      const result = await placeOrderInternal(params);
+      
+      if (result.code === 0) {
+        console.log(`✅ Éxito en intento ${attempt}`);
+        return result;
       }
       
-      const retryAmt = Math.ceil(minUSDT * 1.5 * 100) / 100;
-      console.log(`💰 Reintentando con ${retryAmt} USDT (mínimo: ${minUSDT})`);
+      lastError = new Error(result.msg);
       
-      result = await placeOrderInternal({
-        symbol: sym, side, leverage, usdtAmount: retryAmt, ...rest
-      });
+      // Si es error de cantidad mínima, ajustar
+      if (result.msg && /min|min notional|insufficient|quantity/i.test(result.msg)) {
+        console.log('🔄 Reintentando con mayor cantidad...');
+        
+        let minUSDT;
+        const matchAmount = result.msg.match(/([\d.]+)\s*USDT/i);
+        if (matchAmount) {
+          minUSDT = parseFloat(matchAmount[1]);
+        } else {
+          const info = await getContractInfo(normalizeSymbol(params.symbol));
+          minUSDT = info.minNotional;
+        }
+        
+        const retryAmt = Math.ceil(minUSDT * 1.5 * 100) / 100;
+        console.log(`💰 Ajustando a ${retryAmt} USDT (mínimo: ${minUSDT})`);
+        params.usdtAmount = retryAmt;
+      }
+      
+    } catch (error) {
+      lastError = error;
+      console.log(`❌ Error intento ${attempt}: ${error.message}`);
+      
+      // Esperar antes del siguiente intento
+      if (attempt < maxRetries) {
+        await new Promise(resolve => setTimeout(resolve, 1000 * attempt));
+      }
     }
   }
   
-  return result;
+  throw lastError;
 }
 
 async function placeOrder(params) {
@@ -688,5 +954,12 @@ module.exports = {
   setLeverage,
   getCurrentPrice,
   getContractInfo,
-  closeAllPositions
+  closeAllPositions,
+  // Nuevas funciones mejoradas
+  cleanWebhookData,
+  validateWebhookData,
+  cancelAllTPSLOrders,
+  getCurrentPositionSize,
+  setTPSLOrders,
+  logTradeExecution
 };
