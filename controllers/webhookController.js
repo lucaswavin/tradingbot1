@@ -3,7 +3,7 @@ const {
   placeOrder,
   getUSDTBalance,
   closeAllPositions,
-  getCurrentPrice // <-- AÑADIDO para calcular SL/TP por porcentaje
+  getCurrentPrice
 } = require('../services/bingx/api');
 
 // ======== DASHBOARD SIGNAL HANDLER =========
@@ -70,29 +70,60 @@ exports.handleTradingViewWebhook = async (req, res) => {
 // ========== NÚCLEO LÓGICO: PROCESA Y ENVÍA ORDEN ==========
 
 async function processTradingSignalOptimized(body, startTime) {
+  console.log('\n🔧 === PROCESANDO SEÑAL DE TRADING ===');
+  
+  // Extraer TODOS los parámetros posibles
   const {
     symbol,
     side,
     webhook_secret,
     action,
     qty,
+    quantity,
     strategy,
     leverage = 5,
-    usdtAmount,
+    usdtAmount = 1,
+    // TP/SL en porcentaje
     tpPercent,
     slPercent,
+    tp_percent,
+    sl_percent,
+    // TP/SL en precio absoluto
     takeProfit,
     stopLoss,
+    tpPrice,
+    slPrice,
+    tp_price,
+    sl_price,
+    take_profit,
+    stop_loss,
+    // Otros parámetros
+    type = 'MARKET',
+    limitPrice,
+    limit_price,
     trailing,
+    trailingPercent,
+    trailing_percent,
     reduceOnly,
+    reduce_only,
     positionSide,
+    position_side,
     closeOnTrigger,
+    close_on_trigger,
     ...rest
   } = body;
 
   try {
-    console.log('🔍 Action detectado:', action);
-    console.log('🔍 Strategy detectado:', strategy);
+    console.log('🔍 Parámetros extraídos:');
+    console.log(`   Symbol: ${symbol}`);
+    console.log(`   Side: ${side}`);
+    console.log(`   Action: ${action}`);
+    console.log(`   Leverage: ${leverage}`);
+    console.log(`   USD Amount: ${usdtAmount}`);
+    console.log(`   TP Percent: ${tpPercent || tp_percent || 'No'}`);
+    console.log(`   SL Percent: ${slPercent || sl_percent || 'No'}`);
+    console.log(`   TP Price: ${takeProfit || tpPrice || tp_price || take_profit || 'No'}`);
+    console.log(`   SL Price: ${stopLoss || slPrice || sl_price || stop_loss || 'No'}`);
 
     // SECRET VALIDATION
     if (process.env.WEBHOOK_SECRET && webhook_secret !== process.env.WEBHOOK_SECRET) {
@@ -103,7 +134,7 @@ async function processTradingSignalOptimized(body, startTime) {
 
     // BASIC VALIDATION
     if (!symbol || !side) {
-      console.log('❌ Faltan parámetros requeridos');
+      console.log('❌ Faltan parámetros requeridos: symbol y side');
       await saveErrorRecord(body, 'Faltan parámetros requeridos: symbol y side', startTime);
       return;
     }
@@ -121,9 +152,10 @@ async function processTradingSignalOptimized(body, startTime) {
     global.lastTradingSignalId = signalId;
     global.lastTradingSignalTime = Date.now();
 
-    // ACCIÓN: determinar BUY/SELL/CLOSE
+    // DETERMINAR ACCIÓN: BUY/SELL/CLOSE
     let actionToTake = 'unknown';
     let orderSide = '';
+    
     if (action) {
       const actionLower = action.toLowerCase();
       if (actionLower.includes('close') || actionLower.includes('exit')) {
@@ -136,6 +168,7 @@ async function processTradingSignalOptimized(body, startTime) {
         orderSide = 'SELL';
       }
     }
+    
     if (actionToTake === 'unknown') {
       const sideUpper = side.toUpperCase();
       switch (sideUpper) {
@@ -155,28 +188,33 @@ async function processTradingSignalOptimized(body, startTime) {
           break;
       }
     }
+    
     console.log(`✅ Acción determinada: ${actionToTake}`);
     console.log(`✅ Order side: ${orderSide}`);
 
+    // VERIFICAR BALANCE si es una orden de apertura
     let balance = 0;
     let balancePromise = null;
     if (actionToTake.includes('open')) {
-      console.log('\n--- VERIFICANDO BALANCE (PARALELO) ---');
+      console.log('\n--- VERIFICANDO BALANCE ---');
       balancePromise = getUSDTBalance().catch(() => 0);
     }
 
     // ========== EXECUTE ACTION ==========
-    console.log('\n--- EJECUTANDO ACCIÓN (ULTRA-RÁPIDO) ---');
+    console.log('\n--- EJECUTANDO ACCIÓN ---');
     let response;
+    
     try {
       if (actionToTake === 'close') {
         console.log('🔒 CERRANDO POSICIÓN');
         response = await closeAllPositions(symbol);
 
       } else if (actionToTake === 'open_long' || actionToTake === 'open_short') {
+        // Esperar balance
         if (balancePromise) {
           balance = await balancePromise;
           console.log(`💰 Balance verificado: ${balance} USDT`);
+          
           const minBalance = 2;
           if (balance < minBalance) {
             console.log(`❌ BALANCE INSUFICIENTE: ${balance} < ${minBalance} USDT`);
@@ -186,43 +224,66 @@ async function processTradingSignalOptimized(body, startTime) {
           console.log('✅ Balance suficiente para operar');
         }
 
-        // ====== ORDEN DINÁMICA (CAMPOS AVANZADOS) ======
+        // ====== CONSTRUIR PARÁMETROS DE ORDEN ======
+        console.log('\n--- CONSTRUYENDO PARÁMETROS DE ORDEN ---');
+        
         let orderParams = {
           symbol,
           side: orderSide,
-          leverage: leverage || 5,
-          usdtAmount: usdtAmount || 1,
+          leverage: Number(leverage) || 5,
+          usdtAmount: Number(usdtAmount) || 1,
+          type: (type || 'MARKET').toUpperCase()
         };
 
-        // === TP/SL en porcentaje (relativo a precio de entrada) ===
-        if (tpPercent || slPercent) {
-          const price = await getCurrentPrice(symbol);
-          if (tpPercent) {
-            const tp = parseFloat(tpPercent);
-            if (orderSide === 'BUY')
-              orderParams.takeProfit = Number((price * (1 + tp / 100)).toFixed(4));
-            else
-              orderParams.takeProfit = Number((price * (1 - tp / 100)).toFixed(4));
-          }
-          if (slPercent) {
-            const sl = parseFloat(slPercent);
-            if (orderSide === 'BUY')
-              orderParams.stopLoss = Number((price * (1 - sl / 100)).toFixed(4));
-            else
-              orderParams.stopLoss = Number((price * (1 + sl / 100)).toFixed(4));
-          }
-        }
-        // === TP/SL absolutos ===
-        if (takeProfit) orderParams.takeProfit = takeProfit;
-        if (stopLoss) orderParams.stopLoss = stopLoss;
-        // === Más extras si llegan ===
-        if (trailing) orderParams.trailing = trailing;
-        if (reduceOnly) orderParams.reduceOnly = reduceOnly;
-        if (closeOnTrigger) orderParams.closeOnTrigger = closeOnTrigger;
-        if (positionSide) orderParams.positionSide = positionSide;
-        if (qty) orderParams.quantity = qty;
+        // Cantidad directa si se especifica
+        if (qty) orderParams.quantity = Number(qty);
+        if (quantity) orderParams.quantity = Number(quantity);
+
+        // Precio límite para órdenes LIMIT
+        if (limitPrice) orderParams.limitPrice = Number(limitPrice);
+        if (limit_price) orderParams.limitPrice = Number(limit_price);
+
+        // TP/SL en porcentaje (prioridad a snake_case)
+        if (tp_percent) orderParams.tpPercent = Number(tp_percent);
+        else if (tpPercent) orderParams.tpPercent = Number(tpPercent);
+
+        if (sl_percent) orderParams.slPercent = Number(sl_percent);
+        else if (slPercent) orderParams.slPercent = Number(slPercent);
+
+        // TP/SL en precio absoluto (prioridad a snake_case)
+        if (tp_price) orderParams.tpPrice = Number(tp_price);
+        else if (tpPrice) orderParams.tpPrice = Number(tpPrice);
+        else if (take_profit) orderParams.tpPrice = Number(take_profit);
+        else if (takeProfit) orderParams.tpPrice = Number(takeProfit);
+
+        if (sl_price) orderParams.slPrice = Number(sl_price);
+        else if (slPrice) orderParams.slPrice = Number(slPrice);
+        else if (stop_loss) orderParams.slPrice = Number(stop_loss);
+        else if (stopLoss) orderParams.slPrice = Number(stopLoss);
+
+        // Trailing stop
+        if (trailing_percent) orderParams.trailingPercent = Number(trailing_percent);
+        else if (trailingPercent) orderParams.trailingPercent = Number(trailingPercent);
+        else if (trailing) orderParams.trailingPercent = Number(trailing);
+
+        // Otros parámetros
+        if (reduce_only !== undefined) orderParams.reduceOnly = reduce_only;
+        else if (reduceOnly !== undefined) orderParams.reduceOnly = reduceOnly;
+
+        if (position_side) orderParams.positionSide = position_side;
+        else if (positionSide) orderParams.positionSide = positionSide;
+
+        if (close_on_trigger !== undefined) orderParams.closeOnTrigger = close_on_trigger;
+        else if (closeOnTrigger !== undefined) orderParams.closeOnTrigger = closeOnTrigger;
+
+        // Agregar parámetros extras
         Object.assign(orderParams, rest);
 
+        console.log('📋 Parámetros finales de la orden:');
+        console.log(JSON.stringify(orderParams, null, 2));
+
+        // EJECUTAR ORDEN
+        console.log('\n🚀 Enviando orden a BingX...');
         response = await placeOrder(orderParams);
 
       } else {
@@ -231,33 +292,57 @@ async function processTradingSignalOptimized(body, startTime) {
         return;
       }
 
-      // === GUARDADO Y LOG DE RESPUESTA ===
+      // === PROCESAR RESPUESTA ===
       console.log('\n--- PROCESANDO RESPUESTA ---');
       console.log('📨 Respuesta completa:', JSON.stringify(response, null, 2));
-      const orderSuccess = response && (response.code === 0 || response.success === true);
+      
+      // Determinar si fue exitosa
+      let orderSuccess = false;
+      if (response) {
+        // Para la nueva estructura de respuesta
+        if (response.summary && response.summary.mainSuccess) {
+          orderSuccess = true;
+        }
+        // Para respuesta simple
+        else if (response.code === 0 || response.success === true) {
+          orderSuccess = true;
+        }
+      }
+
       await saveSignalRecord(body, actionToTake, orderSide, response, balance, orderSuccess, null, startTime);
 
       if (orderSuccess) {
         console.log('✅ ACCIÓN EJECUTADA EXITOSAMENTE');
-        if (response.data?.orderId) {
-          console.log('🎉 Order ID:', response.data.orderId);
+        if (response.summary) {
+          console.log('📊 Resumen:');
+          console.log(`   - Orden principal: ${response.summary.mainSuccess ? '✅' : '❌'}`);
+          console.log(`   - Take Profit: ${response.summary.tpSuccess === null ? '⚪ No configurado' : response.summary.tpSuccess ? '✅' : '❌'}`);
+          console.log(`   - Stop Loss: ${response.summary.slSuccess === null ? '⚪ No configurado' : response.summary.slSuccess ? '✅' : '❌'}`);
+          console.log(`   - Leverage: ${response.summary.leverageSet ? '✅' : '⚠️'}`);
+          console.log(`   - Cantidad: ${response.summary.executedQuantity}`);
+          console.log(`   - Precio: ${response.summary.executedPrice}`);
+        }
+        if (response.data?.orderId || response.mainOrder?.data?.orderId) {
+          console.log('🎉 Order ID:', response.data?.orderId || response.mainOrder?.data?.orderId);
         }
       } else {
         console.log('❌ ERROR EN LA RESPUESTA DE BINGX');
-        console.log('📄 Error:', response?.msg || response?.message || 'Sin mensaje');
+        console.log('📄 Error:', response?.msg || response?.message || 'Sin mensaje de error');
       }
 
     } catch (executionError) {
       console.log('❌ ERROR EN EJECUCIÓN:', executionError.message);
+      console.error('💥 Stack trace:', executionError.stack);
       await saveSignalRecord(body, actionToTake, orderSide, null, balance, false, executionError.message, startTime);
     }
 
-    console.log('=====================================\n');
+    console.log('=====================================');
     const totalLatency = Date.now() - startTime;
-    console.log(`⚡ Tiempo total de procesamiento: ${totalLatency}ms`);
+    console.log(`⚡ Tiempo total de procesamiento: ${totalLatency}ms\n`);
 
   } catch (error) {
     console.error('❌ Error crítico en procesamiento:', error);
+    console.error('💥 Stack trace:', error.stack);
     await saveErrorRecord(body, error.message, startTime);
   }
 }
@@ -317,7 +402,7 @@ async function saveErrorRecord(requestBody, errorMessage, startTime) {
   }
 }
 
-// ======= UTILIDADES STATUS/METRICS IGUAL QUE SIEMPRE =======
+// ======= UTILIDADES STATUS/METRICS =======
 exports.testConnection = async (req, res) => {
   console.log('\n🔧 ===== TEST DE CONEXIÓN =====');
   try {
@@ -407,4 +492,3 @@ exports.getMetrics = (req, res) => {
     timestamp: new Date().toISOString()
   });
 };
-
