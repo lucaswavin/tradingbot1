@@ -310,15 +310,24 @@ async function placeOrderInternal(params) {
   let executedQuantity = finalQuantity;
   
   if (tpPercent || slPercent) {
-    console.log('\n⏳ Esperando ejecución de la orden para calcular TP/SL...');
+    console.log('\n⏳ Intentando obtener precio real de ejecución...');
     
-    const executionData = await getOrderExecutionPrice(orderId, symbol);
-    if (executionData) {
-      realExecutionPrice = executionData.avgPrice;
-      executedQuantity = executionData.executedQty;
-      console.log(`✅ Usando precio real de ejecución: ${realExecutionPrice}`);
+    // Primero intentar desde la respuesta directa (más rápido)
+    if (orderResp.data?.data?.order?.avgPrice && parseFloat(orderResp.data.data.order.avgPrice) > 0) {
+      realExecutionPrice = parseFloat(orderResp.data.data.order.avgPrice);
+      executedQuantity = parseFloat(orderResp.data.data.order.executedQty) || finalQuantity;
+      console.log(`✅ Precio real obtenido de respuesta directa: ${realExecutionPrice}`);
     } else {
-      console.log(`⚠️ Usando precio de mercado como fallback: ${realExecutionPrice}`);
+      // Si no está en la respuesta, consultar API
+      console.log('\n⏳ Consultando API para obtener precio real...');
+      const executionData = await getOrderExecutionPrice(orderId, symbol);
+      if (executionData) {
+        realExecutionPrice = executionData.avgPrice;
+        executedQuantity = executionData.executedQty;
+        console.log(`✅ Precio real obtenido de API: ${realExecutionPrice}`);
+      } else {
+        console.log(`⚠️ Usando precio de mercado como fallback: ${realExecutionPrice}`);
+      }
     }
   }
 
@@ -518,4 +527,3 @@ module.exports = {
   getContractInfo,
   closeAllPositions
 };
-
