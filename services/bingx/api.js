@@ -17,6 +17,7 @@ const fastAxios = axios.create({
 });
 
 // ========== UTILS ==========
+
 function normalizeSymbol(symbol) {
   if (!symbol) return symbol;
   let base = symbol.replace(/\.P$/, '');
@@ -185,30 +186,31 @@ async function trailingStopToBE({
   posSide,
   positionSize,
   tickSize,
-  trailingPercent: params.trailingPercent || 1,
+  trailingPercent = 1,
   pollMs = 4000,
   maxAttempts = 60
 }) {
-  console.log(`🚦 Trailing activado: mover SL a BE si se avanza ${trailingPercent}%`);
+  if (!trailingPercent) return;
+  console.log(`🚦 Trailing BE: mover SL a BE si avanza ${trailingPercent}%`);
   let attempts = 0;
   const targetPrice = posSide === 'LONG'
-    ? avgEntryPrice * (1 + trailingPercent/100)
-    : avgEntryPrice * (1 - trailingPercent/100);
+    ? avgEntryPrice * (1 + trailingPercent / 100)
+    : avgEntryPrice * (1 - trailingPercent / 100);
   while (++attempts <= maxAttempts) {
     await new Promise(r => setTimeout(r, pollMs));
     const price = await getCurrentPrice(symbol);
-    if ((posSide === 'LONG' && price >= targetPrice) || (posSide === 'SHORT' && price <= targetPrice)) {
-      // Sube SL a BE
+    if (
+      (posSide === 'LONG' && price >= targetPrice) ||
+      (posSide === 'SHORT' && price <= targetPrice)
+    ) {
       await robustCancelTPSL(symbol, 2);
-      // Crear nuevo SL al precio de entrada promedio
       const newSL = roundToTickSize(avgEntryPrice, tickSize);
-      const size = positionSize;
       const payload = {
         symbol,
         side: posSide === 'LONG' ? 'SELL' : 'BUY',
         positionSide: posSide,
         type: 'STOP_MARKET',
-        quantity: size,
+        quantity: positionSize,
         stopPrice: newSL,
         workingType: 'MARK_PRICE'
       };
@@ -223,6 +225,88 @@ async function trailingStopToBE({
     }
   }
   console.log('⏳ Trailing stop: No se alcanzó el trigger en el tiempo definido');
+  return false;
+}
+
+// ========== TRAILING STOP DINÁMICO QUE SIGUE AL PRECIO ==========
+
+async function dynamicTrailingStop({
+  symbol,
+  side,
+  avgEntryPrice,
+  posSide,
+  positionSize,
+  tickSize,
+  trailingPercent = 1,
+  pollMs = 4000,
+  maxAttempts = 200,
+  minDistancePercent = 0.3
+}) {
+  if (!trailingPercent) return;
+  console.log(`🚦 Trailing dinámico: SL sigue al precio, distancia ${minDistancePercent}%`);
+  let attempts = 0;
+  let maxPrice = avgEntryPrice;
+  let activeSL = avgEntryPrice;
+
+  while (++attempts <= maxAttempts) {
+    await new Promise(r => setTimeout(r, pollMs));
+    const price = await getCurrentPrice(symbol);
+
+    if (posSide === 'LONG') {
+      if (price > maxPrice) maxPrice = price;
+      const trigger = avgEntryPrice * (1 + trailingPercent / 100);
+      const distance = maxPrice * (minDistancePercent / 100);
+      const newSL = roundToTickSize(maxPrice - distance, tickSize);
+
+      if (price >= trigger && newSL > activeSL) {
+        await robustCancelTPSL(symbol, 2);
+        const payload = {
+          symbol,
+          side: 'SELL',
+          positionSide: 'LONG',
+          type: 'STOP_MARKET',
+          quantity: positionSize,
+          stopPrice: newSL,
+          workingType: 'MARK_PRICE'
+        };
+        const ts = Date.now();
+        const raw = buildParams(payload, ts, false);
+        const sig = signParams(raw);
+        const qp = buildParams(payload, ts, true) + `&signature=${sig}`;
+        const slUrl = `https://${HOST}/openApi/swap/v2/trade/order?${qp}`;
+        await fastAxios.post(slUrl, null, { headers: { 'X-BX-APIKEY': API_KEY } });
+        console.log(`⏩ SL actualizado: ${newSL} (precio máximo: ${maxPrice})`);
+        activeSL = newSL;
+      }
+    } else if (posSide === 'SHORT') {
+      if (price < maxPrice) maxPrice = price;
+      const trigger = avgEntryPrice * (1 - trailingPercent / 100);
+      const distance = Math.abs(maxPrice * (minDistancePercent / 100));
+      const newSL = roundToTickSize(maxPrice + distance, tickSize);
+
+      if (price <= trigger && newSL < activeSL) {
+        await robustCancelTPSL(symbol, 2);
+        const payload = {
+          symbol,
+          side: 'BUY',
+          positionSide: 'SHORT',
+          type: 'STOP_MARKET',
+          quantity: positionSize,
+          stopPrice: newSL,
+          workingType: 'MARK_PRICE'
+        };
+        const ts = Date.now();
+        const raw = buildParams(payload, ts, false);
+        const sig = signParams(raw);
+        const qp = buildParams(payload, ts, true) + `&signature=${sig}`;
+        const slUrl = `https://${HOST}/openApi/swap/v2/trade/order?${qp}`;
+        await fastAxios.post(slUrl, null, { headers: { 'X-BX-APIKEY': API_KEY } });
+        console.log(`⏩ SL actualizado: ${newSL} (precio mínimo: ${maxPrice})`);
+        activeSL = newSL;
+      }
+    }
+  }
+  console.log('⏳ Trailing dinámico: finalizó el tiempo máximo sin más avances.');
   return false;
 }
 
@@ -255,7 +339,12 @@ async function placeOrderTrailing(params) {
     slPrice,
     takeProfit,
     stopLoss,
-    quantity
+    quantity,
+    trailingMode, // 'be' o 'dynamic'
+    trailingPercent,
+    trailingPollMs,
+    trailingMaxAttempts,
+    minDistancePercent
   } = params;
 
   const symbol = normalizeSymbol(rawSymbol);
@@ -388,8 +477,21 @@ async function placeOrderTrailing(params) {
     await fastAxios.post(slUrl, null, { headers: { 'X-BX-APIKEY': API_KEY } });
   }
 
-  // === TRAILING SL A BE ===
-  if (params.enableTrailing || true) {
+  // === TRAILING STOP ===
+  if (trailingMode === 'dynamic') {
+    await dynamicTrailingStop({
+      symbol,
+      side,
+      avgEntryPrice,
+      posSide,
+      positionSize: posQty,
+      tickSize: contract.tickSize,
+      trailingPercent: trailingPercent || 1,
+      pollMs: trailingPollMs || 3500,
+      maxAttempts: trailingMaxAttempts || 150,
+      minDistancePercent: minDistancePercent || 0.3
+    });
+  } else if (trailingMode === 'be') {
     await trailingStopToBE({
       symbol,
       side,
@@ -397,23 +499,24 @@ async function placeOrderTrailing(params) {
       posSide,
       positionSize: posQty,
       tickSize: contract.tickSize,
-      trailingPercent: 1, // 1%
-      pollMs: 3500,
-      maxAttempts: 150
+      trailingPercent: trailingPercent || 1,
+      pollMs: trailingPollMs || 3500,
+      maxAttempts: trailingMaxAttempts || 150
     });
   }
 
   // === RESPUESTA/LOGS ===
-  console.log('✅ ORDEN FINALIZADA con trailing a BE si fue necesario');
+  console.log('✅ ORDEN FINALIZADA (con trailing si lo pediste)');
   return {
     mainOrder: orderResp.data,
     avgEntryPrice,
     totalQuantity: posQty,
-    trailingActivated: true
+    trailingActivated: !!trailingMode
   };
 }
 
 // ========== UTILIDADES EXTRA ==========
+
 async function getUSDTBalance() {
   if (!API_KEY || !API_SECRET) throw new Error('API key/secret no configurados');
   const ts = Date.now();
@@ -485,6 +588,7 @@ function validateWebhookData(data) {
 }
 
 // ========== EXPORT ==========
+
 module.exports = {
   getUSDTBalance,
   placeOrderTrailing,
@@ -500,5 +604,7 @@ module.exports = {
   checkExistingPosition,
   getCurrentPositionSize,
   trailingStopToBE,
+  dynamicTrailingStop,
   roundToTickSize
 };
+
