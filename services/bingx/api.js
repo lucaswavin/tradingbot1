@@ -6,7 +6,6 @@ const API_KEY = process.env.BINGX_API_KEY;
 const API_SECRET = process.env.BINGX_API_SECRET;
 const HOST = 'open-api.bingx.com';
 
-// Pool HTTP rápido
 const ultraFastAgent = new https.Agent({
   keepAlive: true,
   keepAliveMsecs: 1000,
@@ -24,7 +23,6 @@ const fastAxios = axios.create({
   }
 });
 
-// Normaliza símbolos (BTCUSDT -> BTC-USDT)
 function normalizeSymbol(symbol) {
   if (!symbol) return symbol;
   let base = symbol.replace(/\.P$/, '');
@@ -34,7 +32,6 @@ function normalizeSymbol(symbol) {
   return base;
 }
 
-// Construye parámetros ordenados + timestamp
 function buildParams(payload, timestamp, urlEncode = false) {
   const clone = { ...payload };
   const keys = Object.keys(clone).sort();
@@ -45,14 +42,12 @@ function buildParams(payload, timestamp, urlEncode = false) {
   return str ? `${str}&timestamp=${timestamp}` : `timestamp=${timestamp}`;
 }
 
-// Firma la query
 function signParams(rawParams) {
   return crypto.createHmac('sha256', API_SECRET)
                .update(rawParams)
                .digest('hex');
 }
 
-// Establece leverage (GET, firmado)
 async function setLeverage(symbol, leverage = 5, side = 'LONG') {
   if (!API_KEY || !API_SECRET) throw new Error('API key/secret no configurados');
   const payload = { symbol, side, leverage };
@@ -61,14 +56,19 @@ async function setLeverage(symbol, leverage = 5, side = 'LONG') {
   const sig = signParams(raw);
   const qp = buildParams(payload, ts, true) + `&signature=${sig}`;
   const url = `https://${HOST}/openApi/swap/v2/trade/leverage?${qp}`;
-
-  const resp = await fastAxios.get(url, {
-    headers: { 'X-BX-APIKEY': API_KEY }
-  });
-  return resp.data;
+  
+  try {
+    const resp = await fastAxios.get(url, {
+      headers: { 'X-BX-APIKEY': API_KEY }
+    });
+    console.log(`🔧 Leverage ${leverage}x establecido para ${symbol} (${side})`);
+    return resp.data;
+  } catch (err) {
+    console.error('❌ Error setLeverage:', err.response?.data || err.message);
+    throw err;
+  }
 }
 
-// Precio de mercado actual
 async function getCurrentPrice(symbol) {
   const url = `https://${HOST}/openApi/swap/v2/quote/price?symbol=${symbol}`;
   const res = await fastAxios.get(url);
@@ -76,7 +76,6 @@ async function getCurrentPrice(symbol) {
   throw new Error(`Precio inválido: ${JSON.stringify(res.data)}`);
 }
 
-// Detalles del contrato (minNotional, etc)
 async function getContractInfo(symbol) {
   try {
     const url = `https://${HOST}/openApi/swap/v2/quote/contracts`;
@@ -96,182 +95,204 @@ async function getContractInfo(symbol) {
   return { minOrderQty:0.001, tickSize:0.01, stepSize:0.001, minNotional:1 };
 }
 
-// -------- PLAN ORDER (SL/TP condicional) --------
-async function createPlanOrder({ symbol, side, positionSide, triggerPrice, type = 'STOP_MARKET', quantity }) {
-  const ts = Date.now();
-  const payload = {
-    symbol,
-    side,
-    positionSide,
-    type, // "STOP_MARKET" para SL/TP market, "TAKE_PROFIT_MARKET" para TP
-    triggerPrice,
-    quantity,
-    workingType: "MARK_PRICE"
-  };
-  const raw = buildParams(payload, ts, false);
-  const sig = signParams(raw);
-  const qp = buildParams(payload, ts, true) + `&signature=${sig}`;
-  const url = `https://${HOST}/openApi/swap/v2/trade/planOrder?${qp}`;
-  try {
-    console.log('🚨 Lanzando planOrder (SL/TP):', payload);
-    const res = await fastAxios.post(url, null, {
-      headers: { 'X-BX-APIKEY': API_KEY }
-    });
-    console.log('📨 Respuesta planOrder:', res.data);
-    return res.data;
-  } catch (err) {
-    console.error('❌ Error createPlanOrder:', err.response?.data || err.message);
-    throw err;
-  }
-}
-
-// -------- ORDEN PRINCIPAL --------
+// ✅ FUNCIÓN PRINCIPAL: Orden + TP + SL automático (3 órdenes independientes)
 async function placeOrderInternal({
   symbol,
   side,
   leverage = 5,
   usdtAmount = 1,
   type = 'MARKET',
-  limitPrice,         // para LIMIT
-  tpPercent,          // TP %
-  slPercent,          // SL %
-  tpPrice,            // TP absoluto
-  slPrice,            // SL absoluto
-  trailingPercent     // Trailing en %
+  limitPrice,
+  tpPercent,
+  slPercent,
+  tpPrice,
+  slPrice,
+  trailingPercent
 }) {
   symbol = normalizeSymbol(symbol);
-
   if (!API_KEY || !API_SECRET) throw new Error('API key/secret no configurados');
+
+  console.log(`🎯 Ejecutando orden: ${side} ${symbol} con ${usdtAmount} USDT (${leverage}x)`);
 
   // 1) Establece leverage
   const posSide = side.toUpperCase() === 'BUY' ? 'LONG' : 'SHORT';
   await setLeverage(symbol, leverage, posSide);
 
-  // 2) Precio actual
+  // 2) Precio actual y cantidad
   const price = await getCurrentPrice(symbol);
-
-  // 3) Cantidad (ajustando a múltiplos de stepSize)
+  console.log(`💰 Precio actual: ${price}`);
+  
   const contract = await getContractInfo(symbol);
   let quantity = Math.max(contract.minOrderQty,
     Math.round((usdtAmount * leverage / price) / contract.stepSize) * contract.stepSize
   );
-  quantity = Number(quantity.toFixed(3));
+  quantity = Number(quantity.toFixed(6));
+  console.log(`📊 Cantidad calculada: ${quantity}`);
 
-  // 4) Cálculo de TP/SL en precio si se pasan porcentajes
+  // 3) Calcula precios de TP/SL
   let takeProfit, stopLoss;
   if (tpPrice) {
     takeProfit = Number(tpPrice);
   } else if (tpPercent) {
     takeProfit = side.toUpperCase() === 'BUY'
-      ? +(price * (1 + Number(tpPercent)/100)).toFixed(6)
-      : +(price * (1 - Number(tpPercent)/100)).toFixed(6);
+      ? Number((price * (1 + Number(tpPercent)/100)).toFixed(6))
+      : Number((price * (1 - Number(tpPercent)/100)).toFixed(6));
   }
   if (slPrice) {
     stopLoss = Number(slPrice);
   } else if (slPercent) {
     stopLoss = side.toUpperCase() === 'BUY'
-      ? +(price * (1 - Number(slPercent)/100)).toFixed(6)
-      : +(price * (1 + Number(slPercent)/100)).toFixed(6);
+      ? Number((price * (1 - Number(slPercent)/100)).toFixed(6))
+      : Number((price * (1 + Number(slPercent)/100)).toFixed(6));
   }
 
-  // 5) Construir payload según tipo de orden principal
-  let payload = {
+  if (takeProfit) console.log(`🎯 Take Profit: ${takeProfit}`);
+  if (stopLoss) console.log(`🛡️ Stop Loss: ${stopLoss}`);
+
+  // 4) ORDEN PRINCIPAL
+  let mainPayload = {
     symbol,
     side: side.toUpperCase(),
     positionSide: posSide,
     type: type.toUpperCase(),
     quantity
   };
-
-  // LIMIT: requiere price
+  
   if (type.toUpperCase() === 'LIMIT' && limitPrice) {
-    payload.price = Number(limitPrice);
-    payload.timeInForce = 'GTC';
+    mainPayload.price = Number(limitPrice);
+    mainPayload.timeInForce = 'GTC';
   }
 
-  // Añadir trailing stop (BingX requiere parámetro adicional, consultar docs)
-  if (trailingPercent) {
-    payload.trailingStop = {
-      type: "TRAILING_STOP_MARKET",
-      callbackRate: Number(trailingPercent),
-      workingType: "MARK_PRICE"
-    };
-  }
+  const ts1 = Date.now();
+  const raw1 = buildParams(mainPayload, ts1, false);
+  const sig1 = signParams(raw1);
+  const qp1 = buildParams(mainPayload, ts1, true) + `&signature=${sig1}`;
+  const mainUrl = `https://${HOST}/openApi/swap/v2/trade/order?${qp1}`;
 
-  // 6) Firma y query
-  const ts = Date.now();
-  const raw = buildParams(payload, ts, false);
-  const sig = signParams(raw);
-  const qp = buildParams(payload, ts, true) + `&signature=${sig}`;
-  const url = `https://${HOST}/openApi/swap/v2/trade/order?${qp}`;
-
-  // 7) POST con body null (principal)
-  let res;
+  let orderResp;
   try {
-    console.log('🚀 placeOrderInternal =>', JSON.stringify({ symbol, side, leverage, usdtAmount, type, limitPrice, tpPercent, slPercent, tpPrice, slPrice, trailingPercent }, null, 2));
-    console.log('📋 Orden (payload/query):', payload);
-    console.log('🔗 URL:', url);
-    res = await fastAxios.post(url, null, { headers: { 'X-BX-APIKEY': API_KEY } });
-    console.log('📨 BingX response:', res.data);
+    console.log('🚀 Ejecutando orden principal:', mainPayload);
+    orderResp = await fastAxios.post(mainUrl, null, {
+      headers: { 'X-BX-APIKEY': API_KEY }
+    });
+    console.log('📨 Respuesta orden principal:', orderResp.data);
+    
+    if (orderResp.data?.code !== 0) {
+      throw new Error(`Error en orden principal: ${orderResp.data?.msg || 'Sin detalle'}`);
+    }
   } catch (err) {
-    console.error('❌ Error placeOrderInternal:', err.response?.data || err.message);
+    console.error('❌ Error orden principal:', err.response?.data || err.message);
     throw err;
   }
 
-  // =========== CREA PLANORDERS (SL/TP) SI SE PIDEN ===========
-  if (res.data?.order && (slPercent || slPrice || tpPercent || tpPrice)) {
-    const execQty = res.data.order.executedQty || payload.quantity;
-    const posSideForPlan = payload.positionSide;
-    // SL
-    if (slPercent || slPrice) {
-      let sl = slPrice;
-      if (slPercent) {
-        sl = side.toUpperCase() === 'BUY'
-          ? +(price * (1 - Number(slPercent) / 100)).toFixed(6)
-          : +(price * (1 + Number(slPercent) / 100)).toFixed(6);
-      }
-      await createPlanOrder({
-        symbol,
-        side: side.toUpperCase() === 'BUY' ? 'SELL' : 'BUY', // Contrario
-        positionSide: posSideForPlan,
-        triggerPrice: sl,
-        type: 'STOP_MARKET',
-        quantity: execQty
+  // 5) TAKE PROFIT (si se especifica)
+  let tpOrder = null;
+  if (takeProfit) {
+    const tpPayload = {
+      symbol,
+      side: side.toUpperCase() === 'BUY' ? 'SELL' : 'BUY',
+      positionSide: posSide,
+      type: 'TAKE_PROFIT_MARKET',
+      quantity,
+      stopPrice: takeProfit,
+      workingType: 'MARK_PRICE'
+    };
+    
+    const ts2 = Date.now();
+    const raw2 = buildParams(tpPayload, ts2, false);
+    const sig2 = signParams(raw2);
+    const qp2 = buildParams(tpPayload, ts2, true) + `&signature=${sig2}`;
+    const tpUrl = `https://${HOST}/openApi/swap/v2/trade/order?${qp2}`;
+    
+    try {
+      console.log('🟢 Colocando Take Profit:', tpPayload);
+      tpOrder = await fastAxios.post(tpUrl, null, { 
+        headers: { 'X-BX-APIKEY': API_KEY } 
       });
-    }
-    // TP
-    if (tpPercent || tpPrice) {
-      let tp = tpPrice;
-      if (tpPercent) {
-        tp = side.toUpperCase() === 'BUY'
-          ? +(price * (1 + Number(tpPercent) / 100)).toFixed(6)
-          : +(price * (1 - Number(tpPercent) / 100)).toFixed(6);
+      console.log('📨 TP response:', tpOrder.data);
+      
+      if (tpOrder.data?.code === 0) {
+        console.log('✅ Take Profit colocado exitosamente');
+      } else {
+        console.log('⚠️ Warning en TP:', tpOrder.data?.msg);
       }
-      await createPlanOrder({
-        symbol,
-        side: side.toUpperCase() === 'BUY' ? 'SELL' : 'BUY', // Contrario
-        positionSide: posSideForPlan,
-        triggerPrice: tp,
-        type: 'TAKE_PROFIT_MARKET',
-        quantity: execQty
-      });
+    } catch (e) {
+      console.error('❌ Error creando TP:', e.response?.data || e.message);
+      tpOrder = { data: { code: -1, msg: e.message } };
     }
   }
 
-  return res.data;
+  // 6) STOP LOSS (si se especifica)
+  let slOrder = null;
+  if (stopLoss) {
+    const slPayload = {
+      symbol,
+      side: side.toUpperCase() === 'BUY' ? 'SELL' : 'BUY',
+      positionSide: posSide,
+      type: 'STOP_MARKET',
+      quantity,
+      stopPrice: stopLoss,
+      workingType: 'MARK_PRICE'
+    };
+    
+    const ts3 = Date.now();
+    const raw3 = buildParams(slPayload, ts3, false);
+    const sig3 = signParams(raw3);
+    const qp3 = buildParams(slPayload, ts3, true) + `&signature=${sig3}`;
+    const slUrl = `https://${HOST}/openApi/swap/v2/trade/order?${qp3}`;
+    
+    try {
+      console.log('🔴 Colocando Stop Loss:', slPayload);
+      slOrder = await fastAxios.post(slUrl, null, { 
+        headers: { 'X-BX-APIKEY': API_KEY } 
+      });
+      console.log('📨 SL response:', slOrder.data);
+      
+      if (slOrder.data?.code === 0) {
+        console.log('✅ Stop Loss colocado exitosamente');
+      } else {
+        console.log('⚠️ Warning en SL:', slOrder.data?.msg);
+      }
+    } catch (e) {
+      console.error('❌ Error creando SL:', e.response?.data || e.message);
+      slOrder = { data: { code: -1, msg: e.message } };
+    }
+  }
+
+  // 7) Retorna resultado completo
+  const result = {
+    mainOrder: orderResp.data,
+    tpOrder: tpOrder ? tpOrder.data : null,
+    slOrder: slOrder ? slOrder.data : null,
+    summary: {
+      mainSuccess: orderResp.data?.code === 0,
+      tpSuccess: tpOrder ? tpOrder.data?.code === 0 : null,
+      slSuccess: slOrder ? slOrder.data?.code === 0 : null,
+      executedPrice: price,
+      executedQuantity: quantity
+    }
+  };
+
+  console.log('🎉 Resultado final:', result.summary);
+  return result;
 }
 
-// Retry mínimo inteligente
+// Retry inteligente
 async function placeOrderWithSmartRetry(params) {
-  const {
-    symbol, side, leverage = 5, usdtAmount = 1, ...rest
-  } = params;
+  const { symbol, side, leverage = 5, usdtAmount = 1, ...rest } = params;
   const sym = normalizeSymbol(symbol);
-  let result = await placeOrderInternal({ symbol: sym, side, leverage, usdtAmount, ...rest });
-  if (result.code === 0) return result;
+  
+  let result = await placeOrderInternal({ 
+    symbol: sym, side, leverage, usdtAmount, ...rest 
+  });
+  
+  if (result.mainOrder?.code === 0) return result;
 
-  const msg = result.msg || result.message || '';
+  // Retry solo si es error de cantidad mínima
+  const msg = result.mainOrder?.msg || '';
   if (/min|min notional|insufficient/.test(msg.toLowerCase())) {
+    console.log('🔄 Reintentando con cantidad mayor...');
+    
     let minUSDT;
     const m = msg.match(/([\d.]+)\s+([A-Z]+)/);
     if (m) {
@@ -282,13 +303,18 @@ async function placeOrderWithSmartRetry(params) {
       const info = await getContractInfo(sym);
       minUSDT = info.minNotional;
     }
-    const retryAmt = Math.ceil(minUSDT * 1.1 * 100) / 100;
-    result = await placeOrderInternal({ symbol: sym, side, leverage, usdtAmount: retryAmt, ...rest });
+    
+    const retryAmt = Math.ceil(minUSDT * 1.2 * 100) / 100; // +20% extra
+    console.log(`💰 Retry con: ${retryAmt} USDT`);
+    
+    result = await placeOrderInternal({ 
+      symbol: sym, side, leverage, usdtAmount: retryAmt, ...rest 
+    });
   }
+  
   return result;
 }
 
-// Expone función principal que recibe todos los params opcionales
 async function placeOrder(params) {
   return placeOrderWithSmartRetry(params);
 }
@@ -312,7 +338,6 @@ async function getUSDTBalance() {
   throw new Error(`Formato inesperado: ${JSON.stringify(data)}`);
 }
 
-// Cierra todas posiciones (POST body null, todo en query)
 async function closeAllPositions(symbol) {
   const ts = Date.now();
   const sym = normalizeSymbol(symbol);
@@ -339,5 +364,3 @@ module.exports = {
   getContractInfo,
   closeAllPositions
 };
-
-
