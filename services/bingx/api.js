@@ -185,7 +185,7 @@ async function trailingStopToBE({
   posSide,
   positionSize,
   tickSize,
-  trailingPercent = 1,
+  trailingPercent: params.trailingPercent || 1,
   pollMs = 4000,
   maxAttempts = 60
 }) {
