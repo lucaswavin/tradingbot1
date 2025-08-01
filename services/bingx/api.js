@@ -16,6 +16,7 @@ const fastAxios = axios.create({
   headers: { 'Connection': 'keep-alive' }
 });
 
+// ========== UTILS ==========
 function normalizeSymbol(symbol) {
   if (!symbol) return symbol;
   let base = symbol.replace(/\.P$/, '');
@@ -24,6 +25,7 @@ function normalizeSymbol(symbol) {
   }
   return base;
 }
+
 function buildParams(payload, timestamp, urlEncode = false) {
   const clone = { ...payload };
   const keys = Object.keys(clone).sort();
@@ -33,11 +35,13 @@ function buildParams(payload, timestamp, urlEncode = false) {
   }).join('&');
   return str ? `${str}&timestamp=${timestamp}` : `timestamp=${timestamp}`;
 }
+
 function signParams(rawParams) {
   return crypto.createHmac('sha256', API_SECRET)
     .update(rawParams)
     .digest('hex');
 }
+
 function getDecimalPlaces(tickSize) {
   const str = tickSize.toExponential();
   if (str.includes('e-')) {
@@ -48,12 +52,15 @@ function getDecimalPlaces(tickSize) {
   if (normalStr.includes('.')) return normalStr.split('.')[1].length;
   return 0;
 }
+
 function roundToTickSize(price, tickSize) {
   const factor = 1 / tickSize;
   const rounded = Math.round((price + Number.EPSILON) * factor) / factor;
   const dp = getDecimalPlaces(tickSize);
   return parseFloat(rounded.toFixed(dp));
 }
+
+// ========== CONTRATO & PRECIO ==========
 
 async function getContractInfo(symbol) {
   const url = `https://${HOST}/openApi/swap/v2/quote/contracts`;
@@ -68,15 +75,19 @@ async function getContractInfo(symbol) {
       maxLeverage: parseInt(c.maxLeverage)
     };
   }
-  // Defaults
+  // Defaults ultra-safe
   return { minOrderQty: 0.001, tickSize: 0.0001, stepSize: 0.001, minNotional: 1, maxLeverage: 20 };
 }
+
 async function getCurrentPrice(symbol) {
   const url = `https://${HOST}/openApi/swap/v2/quote/price?symbol=${symbol}`;
   const res = await fastAxios.get(url);
   if (res.data?.code === 0) return parseFloat(res.data.data.price);
   throw new Error(`Precio inválido: ${JSON.stringify(res.data)}`);
 }
+
+// ========== CANCELACIÓN TP/SL ==========
+
 async function robustCancelTPSL(symbol, maxRetries = 5) {
   for (let i = 0; i < maxRetries; i++) {
     await cancelAllTPSLOrders(symbol);
@@ -95,6 +106,7 @@ async function robustCancelTPSL(symbol, maxRetries = 5) {
   }
   return false;
 }
+
 async function cancelAllTPSLOrders(symbol) {
   const ts = Date.now();
   const payload = { symbol };
@@ -118,6 +130,9 @@ async function cancelAllTPSLOrders(symbol) {
   }
   return tpslOrders.length;
 }
+
+// ========== POSICIONES ==========
+
 async function checkExistingPosition(symbol, newSide) {
   const payload = { symbol };
   const ts = Date.now();
@@ -137,6 +152,7 @@ async function checkExistingPosition(symbol, newSide) {
   }
   return { exists: false, isReentry: false };
 }
+
 async function getCurrentPositionSize(symbol, positionSide) {
   const payload = { symbol };
   const ts = Date.now();
@@ -159,7 +175,20 @@ async function getCurrentPositionSize(symbol, positionSide) {
   }
   return null;
 }
-async function trailingStopToBE({ symbol, side, avgEntryPrice, posSide, positionSize, tickSize, trailingPercent = 1, pollMs = 4000, maxAttempts = 60 }) {
+
+// ========== TRAILING STOP A BREAKEVEN ==========
+
+async function trailingStopToBE({
+  symbol,
+  side,
+  avgEntryPrice,
+  posSide,
+  positionSize,
+  tickSize,
+  trailingPercent = 1,
+  pollMs = 4000,
+  maxAttempts = 60
+}) {
   console.log(`🚦 Trailing activado: mover SL a BE si se avanza ${trailingPercent}%`);
   let attempts = 0;
   const targetPrice = posSide === 'LONG'
@@ -196,6 +225,9 @@ async function trailingStopToBE({ symbol, side, avgEntryPrice, posSide, position
   console.log('⏳ Trailing stop: No se alcanzó el trigger en el tiempo definido');
   return false;
 }
+
+// ========== LEVERAGE ==========
+
 async function setLeverage(symbol, leverage = 5, side = 'LONG') {
   leverage = Math.max(1, Math.min(125, Number(leverage)));
   const payload = { symbol, side, leverage };
@@ -207,7 +239,8 @@ async function setLeverage(symbol, leverage = 5, side = 'LONG') {
   await fastAxios.get(url, { headers: { 'X-BX-APIKEY': API_KEY } });
 }
 
-// === PRINCIPAL: ORDEN UNIFICADA CON TRAILING ===
+// ========== PRINCIPAL: ORDEN UNIFICADA CON TRAILING ==========
+
 async function placeOrderTrailing(params) {
   const {
     symbol: rawSymbol,
@@ -380,9 +413,81 @@ async function placeOrderTrailing(params) {
   };
 }
 
+// ========== UTILIDADES EXTRA ==========
+async function getUSDTBalance() {
+  if (!API_KEY || !API_SECRET) throw new Error('API key/secret no configurados');
+  const ts = Date.now();
+  const raw = `timestamp=${ts}`;
+  const sig = crypto.createHmac('sha256', API_SECRET).update(raw).digest('hex');
+  const url = `https://${HOST}/openApi/swap/v2/user/balance?${raw}&signature=${sig}`;
+  const res = await fastAxios.get(url, { headers: { 'X-BX-APIKEY': API_KEY } });
+  const data = typeof res.data === 'string' ? JSON.parse(res.data) : res.data;
+  if (data.code === 0) {
+    if (Array.isArray(data.data)) {
+      const u = data.data.find(x => x.asset === 'USDT');
+      return parseFloat(u?.balance || 0);
+    }
+    if (data.data.balance?.balance) return parseFloat(data.data.balance.balance);
+  }
+  throw new Error(`Formato inesperado: ${JSON.stringify(data)}`);
+}
+
+async function closeAllPositions(symbol) {
+  const ts = Date.now();
+  const sym = normalizeSymbol(symbol);
+  const payload = { symbol: sym, side: 'BOTH', type: 'MARKET' };
+  const raw = buildParams(payload, ts, false);
+  const sig = signParams(raw);
+  const qp = buildParams(payload, ts, true) + `&signature=${sig}`;
+  const url = `https://${HOST}/openApi/swap/v2/trade/closeAllPositions?${qp}`;
+  try {
+    const res = await fastAxios.post(url, null, { headers: { 'X-BX-APIKEY': API_KEY } });
+    return res.data;
+  } catch (err) {
+    console.error('❌ Error closeAllPositions:', err.response?.data || err.message);
+    throw err;
+  }
+}
+
+// ========== LIMPIEZA DE DATOS ==========
+function cleanWebhookData(rawData) {
+  const cleanData = {};
+  const processedKeys = new Set();
+  for (const [key, value] of Object.entries(rawData)) {
+    if (!processedKeys.has(key)) {
+      cleanData[key] = value;
+      processedKeys.add(key);
+    }
+  }
+  return cleanData;
+}
+
+function validateWebhookData(data) {
+  const required = ['symbol', 'side'];
+  const missing = required.filter(field => !data[field]);
+  if (missing.length > 0) {
+    throw new Error(`Campos requeridos faltantes: ${missing.join(', ')}`);
+  }
+  const validSides = ['BUY', 'SELL', 'LONG', 'SHORT'];
+  if (!validSides.includes(data.side?.toUpperCase())) {
+    throw new Error(`Side inválido: ${data.side}. Debe ser uno de: ${validSides.join(', ')}`);
+  }
+  if (data.leverage && (isNaN(data.leverage) || data.leverage < 1 || data.leverage > 125)) {
+    data.leverage = 5;
+  }
+  if (data.tpPercent && (isNaN(data.tpPercent) || data.tpPercent <= 0)) {
+    delete data.tpPercent;
+  }
+  if (data.slPercent && (isNaN(data.slPercent) || data.slPercent <= 0)) {
+    delete data.slPercent;
+  }
+  return data;
+}
+
+// ========== EXPORT ==========
 module.exports = {
   getUSDTBalance,
-  placeOrder,
+  placeOrderTrailing,
   normalizeSymbol,
   setLeverage,
   getCurrentPrice,
@@ -391,6 +496,9 @@ module.exports = {
   cleanWebhookData,
   validateWebhookData,
   cancelAllTPSLOrders,
+  robustCancelTPSL,
   checkExistingPosition,
-  getCurrentPositionSize
+  getCurrentPositionSize,
+  trailingStopToBE,
+  roundToTickSize
 };
