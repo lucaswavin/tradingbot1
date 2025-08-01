@@ -591,7 +591,7 @@ function validateWebhookData(data) {
 
 module.exports = {
   getUSDTBalance,
-  placeOrderTrailing,
+  placeOrder: placeOrderTrailing,
   normalizeSymbol,
   setLeverage,
   getCurrentPrice,
