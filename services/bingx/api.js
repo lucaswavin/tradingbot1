@@ -129,25 +129,49 @@ async function placeOrderInternal({
   quantity = Number(quantity.toFixed(6));
   console.log(`📊 Cantidad calculada: ${quantity}`);
 
-  // 3) Calcula precios de TP/SL
+  // 3) ✅ DEBUGGING MEJORADO: Calcula precios de TP/SL
+  console.log(`🔍 DEBUG - Parámetros recibidos:`);
+  console.log(`   tpPercent: ${tpPercent}, tpPrice: ${tpPrice}`);
+  console.log(`   slPercent: ${slPercent}, slPrice: ${slPrice}`);
+  console.log(`   side: ${side}, price: ${price}`);
+
   let takeProfit, stopLoss;
+  
+  // Take Profit
   if (tpPrice) {
     takeProfit = Number(tpPrice);
+    console.log(`✅ TP desde precio absoluto: ${takeProfit}`);
   } else if (tpPercent) {
-    takeProfit = side.toUpperCase() === 'BUY'
-      ? Number((price * (1 + Number(tpPercent)/100)).toFixed(6))
-      : Number((price * (1 - Number(tpPercent)/100)).toFixed(6));
+    const tpPerc = Number(tpPercent);
+    console.log(`🔍 Calculando TP con ${tpPerc}% desde precio ${price}`);
+    
+    if (side.toUpperCase() === 'BUY') {
+      takeProfit = Number((price * (1 + tpPerc/100)).toFixed(6));
+      console.log(`✅ TP para BUY: ${price} * (1 + ${tpPerc}/100) = ${takeProfit}`);
+    } else {
+      takeProfit = Number((price * (1 - tpPerc/100)).toFixed(6));
+      console.log(`✅ TP para SELL: ${price} * (1 - ${tpPerc}/100) = ${takeProfit}`);
+    }
   }
+  
+  // Stop Loss
   if (slPrice) {
     stopLoss = Number(slPrice);
+    console.log(`✅ SL desde precio absoluto: ${stopLoss}`);
   } else if (slPercent) {
-    stopLoss = side.toUpperCase() === 'BUY'
-      ? Number((price * (1 - Number(slPercent)/100)).toFixed(6))
-      : Number((price * (1 + Number(slPercent)/100)).toFixed(6));
+    const slPerc = Number(slPercent);
+    console.log(`🔍 Calculando SL con ${slPerc}% desde precio ${price}`);
+    
+    if (side.toUpperCase() === 'BUY') {
+      stopLoss = Number((price * (1 - slPerc/100)).toFixed(6));
+      console.log(`✅ SL para BUY: ${price} * (1 - ${slPerc}/100) = ${stopLoss}`);
+    } else {
+      stopLoss = Number((price * (1 + slPerc/100)).toFixed(6));
+      console.log(`✅ SL para SELL: ${price} * (1 + ${slPerc}/100) = ${stopLoss}`);
+    }
   }
 
-  if (takeProfit) console.log(`🎯 Take Profit: ${takeProfit}`);
-  if (stopLoss) console.log(`🛡️ Stop Loss: ${stopLoss}`);
+  console.log(`🎯 RESULTADO FINAL - TP: ${takeProfit}, SL: ${stopLoss}`);
 
   // 4) ORDEN PRINCIPAL
   let mainPayload = {
@@ -185,9 +209,10 @@ async function placeOrderInternal({
     throw err;
   }
 
-  // 5) TAKE PROFIT (si se especifica)
+  // 5) ✅ TAKE PROFIT con debugging mejorado
   let tpOrder = null;
   if (takeProfit) {
+    console.log(`🟢 INICIANDO CREACIÓN DE TAKE PROFIT...`);
     const tpPayload = {
       symbol,
       side: side.toUpperCase() === 'BUY' ? 'SELL' : 'BUY',
@@ -198,33 +223,41 @@ async function placeOrderInternal({
       workingType: 'MARK_PRICE'
     };
     
+    console.log(`🔍 TP Payload completo:`, JSON.stringify(tpPayload, null, 2));
+    
     const ts2 = Date.now();
     const raw2 = buildParams(tpPayload, ts2, false);
     const sig2 = signParams(raw2);
     const qp2 = buildParams(tpPayload, ts2, true) + `&signature=${sig2}`;
     const tpUrl = `https://${HOST}/openApi/swap/v2/trade/order?${qp2}`;
     
+    console.log(`🔗 TP URL: ${tpUrl}`);
+    
     try {
-      console.log('🟢 Colocando Take Profit:', tpPayload);
+      console.log('🟢 Enviando solicitud TP a BingX...');
       tpOrder = await fastAxios.post(tpUrl, null, { 
         headers: { 'X-BX-APIKEY': API_KEY } 
       });
-      console.log('📨 TP response:', tpOrder.data);
+      console.log('📨 TP response RAW:', JSON.stringify(tpOrder.data, null, 2));
       
       if (tpOrder.data?.code === 0) {
-        console.log('✅ Take Profit colocado exitosamente');
+        console.log('✅ Take Profit colocado exitosamente!');
       } else {
-        console.log('⚠️ Warning en TP:', tpOrder.data?.msg);
+        console.log('⚠️ TP falló:', tpOrder.data?.msg || 'Sin mensaje de error');
       }
     } catch (e) {
-      console.error('❌ Error creando TP:', e.response?.data || e.message);
+      console.error('❌ Error COMPLETO creando TP:', e.response?.data || e.message);
+      console.error('❌ TP Stack trace:', e.stack);
       tpOrder = { data: { code: -1, msg: e.message } };
     }
+  } else {
+    console.log('⚠️ NO SE CREARÁ TP - takeProfit es:', takeProfit);
   }
 
-  // 6) STOP LOSS (si se especifica)
+  // 6) ✅ STOP LOSS con debugging mejorado
   let slOrder = null;
   if (stopLoss) {
+    console.log(`🔴 INICIANDO CREACIÓN DE STOP LOSS...`);
     const slPayload = {
       symbol,
       side: side.toUpperCase() === 'BUY' ? 'SELL' : 'BUY',
@@ -235,28 +268,35 @@ async function placeOrderInternal({
       workingType: 'MARK_PRICE'
     };
     
+    console.log(`🔍 SL Payload completo:`, JSON.stringify(slPayload, null, 2));
+    
     const ts3 = Date.now();
     const raw3 = buildParams(slPayload, ts3, false);
     const sig3 = signParams(raw3);
     const qp3 = buildParams(slPayload, ts3, true) + `&signature=${sig3}`;
     const slUrl = `https://${HOST}/openApi/swap/v2/trade/order?${qp3}`;
     
+    console.log(`🔗 SL URL: ${slUrl}`);
+    
     try {
-      console.log('🔴 Colocando Stop Loss:', slPayload);
+      console.log('🔴 Enviando solicitud SL a BingX...');
       slOrder = await fastAxios.post(slUrl, null, { 
         headers: { 'X-BX-APIKEY': API_KEY } 
       });
-      console.log('📨 SL response:', slOrder.data);
+      console.log('📨 SL response RAW:', JSON.stringify(slOrder.data, null, 2));
       
       if (slOrder.data?.code === 0) {
-        console.log('✅ Stop Loss colocado exitosamente');
+        console.log('✅ Stop Loss colocado exitosamente!');
       } else {
-        console.log('⚠️ Warning en SL:', slOrder.data?.msg);
+        console.log('⚠️ SL falló:', slOrder.data?.msg || 'Sin mensaje de error');
       }
     } catch (e) {
-      console.error('❌ Error creando SL:', e.response?.data || e.message);
+      console.error('❌ Error COMPLETO creando SL:', e.response?.data || e.message);
+      console.error('❌ SL Stack trace:', e.stack);
       slOrder = { data: { code: -1, msg: e.message } };
     }
+  } else {
+    console.log('⚠️ NO SE CREARÁ SL - stopLoss es:', stopLoss);
   }
 
   // 7) Retorna resultado completo
