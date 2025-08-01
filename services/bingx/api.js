@@ -17,7 +17,7 @@ const ultraFastAgent = new https.Agent({
 
 const fastAxios = axios.create({
   httpsAgent: ultraFastAgent,
-  timeout: 8000, // Aumentado para operaciones más lentas
+  timeout: 8000,
   headers: {
     'Connection': 'keep-alive'
   }
@@ -51,8 +51,7 @@ function signParams(rawParams) {
 async function setLeverage(symbol, leverage = 5, side = 'LONG') {
   if (!API_KEY || !API_SECRET) throw new Error('API key/secret no configurados');
   
-  // Validar leverage
-  leverage = Math.max(1, Math.min(125, Number(leverage))); // BingX permite 1-125x
+  leverage = Math.max(1, Math.min(125, Number(leverage)));
   
   const payload = { symbol, side, leverage };
   const ts = Date.now();
@@ -76,7 +75,6 @@ async function setLeverage(symbol, leverage = 5, side = 'LONG') {
     return resp.data;
   } catch (err) {
     console.error('❌ Error setLeverage:', err.response?.data || err.message);
-    // No lanzar error aquí, continuar con la orden
     return { code: -1, msg: err.message };
   }
 }
@@ -110,10 +108,76 @@ async function getContractInfo(symbol) {
   return { minOrderQty: 0.001, tickSize: 0.01, stepSize: 0.001, minNotional: 1, maxLeverage: 20 };
 }
 
-// ================== ORDEN PRINCIPAL + TP/SL ==================
+// ================== OBTENER PRECIO REAL DE EJECUCIÓN ==================
+
+async function getOrderExecutionPrice(orderId, symbol, maxRetries = 10) {
+  console.log(`🔍 Obteniendo precio real de ejecución para orden ${orderId}...`);
+  
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    try {
+      const payload = { symbol, orderId };
+      const ts = Date.now();
+      const raw = buildParams(payload, ts, false);
+      const sig = signParams(raw);
+      const qp = buildParams(payload, ts, true) + `&signature=${sig}`;
+      const url = `https://${HOST}/openApi/swap/v2/trade/order?${qp}`;
+
+      const response = await fastAxios.get(url, {
+        headers: { 'X-BX-APIKEY': API_KEY }
+      });
+
+      if (response.data?.code === 0 && response.data.data) {
+        const order = response.data.data;
+        
+        // Verificar si la orden está completamente ejecutada
+        if (order.status === 'FILLED' && order.avgPrice && parseFloat(order.avgPrice) > 0) {
+          const avgPrice = parseFloat(order.avgPrice);
+          const executedQty = parseFloat(order.executedQty || order.origQty);
+          
+          console.log(`✅ Precio real de ejecución obtenido: ${avgPrice}`);
+          console.log(`📊 Cantidad ejecutada: ${executedQty}`);
+          
+          return {
+            avgPrice,
+            executedQty,
+            status: order.status,
+            orderId: order.orderId
+          };
+        } else if (order.status === 'PARTIALLY_FILLED' && order.avgPrice) {
+          // Si está parcialmente ejecutada, usar el precio promedio actual
+          const avgPrice = parseFloat(order.avgPrice);
+          const executedQty = parseFloat(order.executedQty);
+          
+          console.log(`⏳ Orden parcialmente ejecutada: ${avgPrice} (${executedQty})`);
+          
+          return {
+            avgPrice,
+            executedQty,
+            status: order.status,
+            orderId: order.orderId
+          };
+        } else {
+          console.log(`⏳ Intento ${attempt}/${maxRetries} - Estado: ${order.status}`);
+        }
+      }
+      
+      // Esperar antes del siguiente intento
+      await new Promise(resolve => setTimeout(resolve, 500));
+      
+    } catch (error) {
+      console.error(`❌ Error intento ${attempt}:`, error.message);
+      await new Promise(resolve => setTimeout(resolve, 1000));
+    }
+  }
+  
+  console.log('⚠️ No se pudo obtener precio de ejecución, usando precio de mercado como fallback');
+  return null;
+}
+
+// ================== ORDEN PRINCIPAL + TP/SL CORREGIDO ==================
 
 async function placeOrderInternal(params) {
-  console.log('\n🚀 === PLACE ORDER INTERNAL ===');
+  console.log('\n🚀 === PLACE ORDER INTERNAL (TP/SL CORREGIDO) ===');
   console.log('📋 Parámetros recibidos:', JSON.stringify(params, null, 2));
 
   const {
@@ -126,12 +190,12 @@ async function placeOrderInternal(params) {
     // TP/SL en porcentaje
     tpPercent,
     slPercent,
-    // TP/SL en precio absoluto
+    // TP/SL en precio absoluto (estos se usarán tal como vienen)
     tpPrice,
     slPrice,
-    takeProfit, // Alias para tpPrice
-    stopLoss,   // Alias para slPrice
-    quantity,   // Cantidad directa
+    takeProfit,
+    stopLoss,
+    quantity,
     trailingPercent
   } = params;
 
@@ -140,62 +204,44 @@ async function placeOrderInternal(params) {
 
   console.log(`🎯 Symbol normalizado: ${rawSymbol} -> ${symbol}`);
 
-  // 1) Configurar leverage SIEMPRE
+  // 1) Configurar leverage
   const posSide = side.toUpperCase() === 'BUY' ? 'LONG' : 'SHORT';
   const leverageResult = await setLeverage(symbol, leverage, posSide);
   
   // 2) Obtener precio actual y info del contrato
-  const price = await getCurrentPrice(symbol);
+  const marketPrice = await getCurrentPrice(symbol);
   const contract = await getContractInfo(symbol);
   
-  console.log(`💰 Precio actual: ${price}`);
+  console.log(`💰 Precio de mercado: ${marketPrice}`);
   console.log(`📊 Contrato info:`, contract);
 
-  // 3) Calcular cantidad si no se especifica
+  // 3) Calcular cantidad
   let finalQuantity;
   if (quantity) {
     finalQuantity = Number(quantity);
   } else {
     finalQuantity = Math.max(
       contract.minOrderQty,
-      Math.round((usdtAmount * leverage / price) / contract.stepSize) * contract.stepSize
+      Math.round((usdtAmount * leverage / marketPrice) / contract.stepSize) * contract.stepSize
     );
   }
   finalQuantity = Number(finalQuantity.toFixed(6));
   
   console.log(`📏 Cantidad calculada: ${finalQuantity}`);
 
-  // 4) Calcular TP/SL finales (prioridad: tpPrice/slPrice > takeProfit/stopLoss > tpPercent/slPercent)
-  let finalTpPrice, finalSlPrice;
+  // 4) TP/SL absolutos (si vienen, se usan tal como están - NO se recalculan)
+  let absoluteTpPrice, absoluteSlPrice;
+  
+  if (tpPrice) absoluteTpPrice = Number(tpPrice);
+  else if (takeProfit) absoluteTpPrice = Number(takeProfit);
+  
+  if (slPrice) absoluteSlPrice = Number(slPrice);
+  else if (stopLoss) absoluteSlPrice = Number(stopLoss);
 
-  // Take Profit
-  if (tpPrice) {
-    finalTpPrice = Number(tpPrice);
-  } else if (takeProfit) {
-    finalTpPrice = Number(takeProfit);
-  } else if (tpPercent) {
-    const tpPerc = Number(tpPercent);
-    finalTpPrice = side.toUpperCase() === 'BUY'
-      ? Number((price * (1 + tpPerc / 100)).toFixed(6))
-      : Number((price * (1 - tpPerc / 100)).toFixed(6));
-  }
+  console.log(`🎯 TP absoluto: ${absoluteTpPrice || 'No configurado'}`);
+  console.log(`🛡️ SL absoluto: ${absoluteSlPrice || 'No configurado'}`);
 
-  // Stop Loss
-  if (slPrice) {
-    finalSlPrice = Number(slPrice);
-  } else if (stopLoss) {
-    finalSlPrice = Number(stopLoss);
-  } else if (slPercent) {
-    const slPerc = Number(slPercent);
-    finalSlPrice = side.toUpperCase() === 'BUY'
-      ? Number((price * (1 - slPerc / 100)).toFixed(6))
-      : Number((price * (1 + slPerc / 100)).toFixed(6));
-  }
-
-  console.log(`🎯 TP calculado: ${finalTpPrice || 'No'}`);
-  console.log(`🛡️ SL calculado: ${finalSlPrice || 'No'}`);
-
-  // 5) ORDEN PRINCIPAL
+  // 5) EJECUTAR ORDEN PRINCIPAL
   let mainPayload = {
     symbol,
     side: side.toUpperCase(),
@@ -212,7 +258,6 @@ async function placeOrderInternal(params) {
   console.log('\n📤 Enviando orden principal...');
   console.log('📋 Payload:', mainPayload);
 
-  // 6) Ejecutar orden principal
   const ts1 = Date.now();
   const raw1 = buildParams(mainPayload, ts1, false);
   const sig1 = signParams(raw1);
@@ -235,19 +280,59 @@ async function placeOrderInternal(params) {
     throw err;
   }
 
-  // 7) Esperar un poco antes de TP/SL
-  await new Promise(resolve => setTimeout(resolve, 500));
+  const orderId = orderResp.data?.data?.orderId;
+  if (!orderId) {
+    throw new Error('No se obtuvo orderId de la respuesta');
+  }
 
-  // 8) Take Profit (orden condicional)
+  // 6) OBTENER PRECIO REAL DE EJECUCIÓN
+  let realExecutionPrice = marketPrice; // Fallback
+  let executedQuantity = finalQuantity;
+  
+  if (tpPercent || slPercent) {
+    console.log('\n⏳ Esperando ejecución de la orden para calcular TP/SL...');
+    
+    const executionData = await getOrderExecutionPrice(orderId, symbol);
+    if (executionData) {
+      realExecutionPrice = executionData.avgPrice;
+      executedQuantity = executionData.executedQty;
+      console.log(`✅ Usando precio real de ejecución: ${realExecutionPrice}`);
+    } else {
+      console.log(`⚠️ Usando precio de mercado como fallback: ${realExecutionPrice}`);
+    }
+  }
+
+  // 7) CALCULAR TP/SL BASADO EN PRECIO REAL
+  let finalTpPrice = absoluteTpPrice; // Si ya está definido, no se recalcula
+  let finalSlPrice = absoluteSlPrice;
+
+  // Solo calcular porcentajes si no hay precios absolutos
+  if (!finalTpPrice && tpPercent) {
+    const tpPerc = Number(tpPercent);
+    finalTpPrice = side.toUpperCase() === 'BUY'
+      ? Number((realExecutionPrice * (1 + tpPerc / 100)).toFixed(6))
+      : Number((realExecutionPrice * (1 - tpPerc / 100)).toFixed(6));
+    console.log(`📈 TP calculado con precio real: ${realExecutionPrice} + ${tpPerc}% = ${finalTpPrice}`);
+  }
+
+  if (!finalSlPrice && slPercent) {
+    const slPerc = Number(slPercent);
+    finalSlPrice = side.toUpperCase() === 'BUY'
+      ? Number((realExecutionPrice * (1 - slPerc / 100)).toFixed(6))
+      : Number((realExecutionPrice * (1 + slPerc / 100)).toFixed(6));
+    console.log(`🛡️ SL calculado con precio real: ${realExecutionPrice} - ${slPerc}% = ${finalSlPrice}`);
+  }
+
+  // 8) ENVIAR TP/SL CON PRECIOS CORRECTOS
   let tpOrder = null;
   if (finalTpPrice) {
-    console.log('\n📈 Configurando Take Profit...');
+    console.log('\n📈 Configurando Take Profit con precio real...');
     const tpPayload = {
       symbol,
       side: side.toUpperCase() === 'BUY' ? 'SELL' : 'BUY',
       positionSide: posSide,
       type: 'TAKE_PROFIT_MARKET',
-      quantity: finalQuantity,
+      quantity: executedQuantity,
       stopPrice: finalTpPrice,
       workingType: 'MARK_PRICE'
     };
@@ -270,16 +355,15 @@ async function placeOrderInternal(params) {
     }
   }
 
-  // 9) Stop Loss (orden condicional)
   let slOrder = null;
   if (finalSlPrice) {
-    console.log('\n🛡️ Configurando Stop Loss...');
+    console.log('\n🛡️ Configurando Stop Loss con precio real...');
     const slPayload = {
       symbol,
       side: side.toUpperCase() === 'BUY' ? 'SELL' : 'BUY',
       positionSide: posSide,
       type: 'STOP_MARKET',
-      quantity: finalQuantity,
+      quantity: executedQuantity,
       stopPrice: finalSlPrice,
       workingType: 'MARK_PRICE'
     };
@@ -302,7 +386,7 @@ async function placeOrderInternal(params) {
     }
   }
 
-  // 10) Retorna respuesta completa
+  // 9) RESPUESTA FINAL
   const result = {
     code: orderResp.data?.code || -1,
     msg: orderResp.data?.msg || 'Error desconocido',
@@ -315,15 +399,18 @@ async function placeOrderInternal(params) {
       tpSuccess: tpOrder ? tpOrder.data?.code === 0 : null,
       slSuccess: slOrder ? slOrder.data?.code === 0 : null,
       leverageSet: leverageResult?.code === 0,
-      executedPrice: price,
-      executedQuantity: finalQuantity,
+      marketPrice: marketPrice,
+      realExecutionPrice: realExecutionPrice,
+      executedQuantity: executedQuantity,
       takeProfit: finalTpPrice,
-      stopLoss: finalSlPrice
+      stopLoss: finalSlPrice,
+      tpMethod: absoluteTpPrice ? 'Precio absoluto' : tpPercent ? 'Porcentaje sobre precio real' : 'No configurado',
+      slMethod: absoluteSlPrice ? 'Precio absoluto' : slPercent ? 'Porcentaje sobre precio real' : 'No configurado'
     }
   };
 
-  console.log('\n✅ === ORDEN COMPLETADA ===');
-  console.log('📊 Resumen:', result.summary);
+  console.log('\n✅ === ORDEN COMPLETADA (TP/SL CORREGIDO) ===');
+  console.log('📊 Resumen:', JSON.stringify(result.summary, null, 2));
   
   return result;
 }
@@ -337,7 +424,6 @@ async function placeOrderWithSmartRetry(params) {
     symbol: sym, side, leverage, usdtAmount, ...rest
   });
 
-  // Si la orden principal falló, intentar con mayor cantidad
   if (result.code !== 0) {
     const msg = result.msg || '';
     if (/min|min notional|insufficient|quantity/i.test(msg)) {
@@ -352,7 +438,7 @@ async function placeOrderWithSmartRetry(params) {
         minUSDT = info.minNotional;
       }
       
-      const retryAmt = Math.ceil(minUSDT * 1.5 * 100) / 100; // +50% de margen
+      const retryAmt = Math.ceil(minUSDT * 1.5 * 100) / 100;
       console.log(`💰 Reintentando con ${retryAmt} USDT (mínimo: ${minUSDT})`);
       
       result = await placeOrderInternal({
@@ -364,7 +450,6 @@ async function placeOrderWithSmartRetry(params) {
   return result;
 }
 
-// Función principal exportada
 async function placeOrder(params) {
   return placeOrderWithSmartRetry(params);
 }
@@ -413,7 +498,4 @@ module.exports = {
   getContractInfo,
   closeAllPositions
 };
-
-
-
 
