@@ -239,12 +239,14 @@ async function getCurrentPositionSize(symbol, positionSide) {
           
           if (positionAmt !== 0) {
             const absSize = Math.abs(positionAmt);
-            const actualSide = positionAmt > 0 ? 'LONG' : 'SHORT';
+            // ✅ USAR EL CAMPO positionSide DE LA API (NO calcular desde positionAmt)
+            const actualSide = position.positionSide || (positionAmt > 0 ? 'LONG' : 'SHORT');
             
             console.log(`📈 [DEBUG] Comparación de lados:`, {
               actualSide,
               expectedSide: positionSide,
-              match: actualSide === positionSide
+              match: actualSide === positionSide,
+              apiPositionSide: position.positionSide
             });
             
             if (actualSide === positionSide) {
@@ -303,7 +305,8 @@ async function checkExistingPosition(symbol, newSide) {
           const positionAmt = parseFloat(position.positionAmt);
           
           if (positionAmt !== 0) {
-            const existingSide = positionAmt > 0 ? 'LONG' : 'SHORT';
+            // ✅ USAR EL CAMPO positionSide DE LA API
+            const existingSide = position.positionSide || (positionAmt > 0 ? 'LONG' : 'SHORT');
             const size = Math.abs(positionAmt);
             const entryPrice = parseFloat(position.avgPrice) || parseFloat(position.entryPrice);
             const isReentry = existingSide === newSide;
