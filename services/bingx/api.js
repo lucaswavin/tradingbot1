@@ -1,20 +1,3 @@
-De acuerdo. Entendido.
-
-Aquí tienes el código original que proporcionaste, completo, con todas sus funciones, pero con las correcciones necesarias integradas para que funcione de manera robusta y solucione los errores de cantidad y de latencia.
-
-He mantenido la estructura y todas las funciones que tenías, incluyendo los trailing stops, la obtención de balance, etc. Los cambios clave son:
-
-Validación de Cantidad Mínima: Se ha añadido una comprobación para asegurar que la cantidad a ordenar no sea inferior a la mínima permitida por el contrato, solucionando el error Invalid parameters, quantity.
-
-Bucle de Reintentos: Se ha sustituido la espera fija (setTimeout) por un bucle de reintentos robusto que espera a que la API confirme la posición consolidada antes de establecer el TP/SL.
-
-Correcciones Menores en Peticiones API: Se ha asegurado el uso del método HTTP correcto (POST) para las acciones que lo requieren, como establecer el apalancamiento.
-
-Este es el script completo y corregido:
-
-Generated javascript
-// --- DEPENDENCIAS Y CONFIGURACIÓN INICIAL ---
-require('dotenv').config(); // Asegúrate de tener 'dotenv' instalado (npm install dotenv)
 const axios = require('axios');
 const crypto = require('crypto');
 const https = require('https');
