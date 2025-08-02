@@ -58,7 +58,7 @@ function signParams(rawParams) {
 }
 
 function getDecimalPlacesForTickSize(tickSize) {
-    const str = tickSize.toExponential();
+    const str = tickSize.toString();
     if (str.includes('e-')) {
         const exp = parseInt(str.split('e-')[1]);
         return exp + (str.split('e-')[0].split('.')[1]?.length || 0) - 1;
@@ -398,8 +398,11 @@ async function placeOrder(params) {
   if (trailingMode) {
     console.log("\n▶️ Iniciando Trailing Stop en segundo plano...");
     const trailingParams = { symbol, avgEntryPrice, posSide, positionSize: posQty, tickSize: contract.tickSize, trailingPercent, minDistancePercent };
-    if (trailingMode === 'dynamic') dynamicTrailingStop(trailingParams);
-    else if (trailingMode === 'be') trailingStopToBE(trailingParams);
+    if (trailingMode === 'dynamic') {
+        dynamicTrailingStop(trailingParams);
+    } else if (trailingMode === 'be') {
+        trailingStopToBE(trailingParams);
+    }
   } else if (tpPercent || slPercent) {
     console.log('\n🎯 Configurando TP/SL fijos...');
     const sltpSide = posSide === 'LONG' ? 'SELL' : 'BUY';
