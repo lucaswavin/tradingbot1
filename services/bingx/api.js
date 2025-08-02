@@ -36,8 +36,11 @@ function normalizeSymbol(symbol) {
   return base;
 }
 
+// 🔧 FUNCIÓN OFICIAL DE BINGX (basada en su documentación)
 function getParameters(payload, timestamp, urlEncode = false) {
     let parameters = "";
+    
+    // 1. Recorrer payload en orden de inserción (NO ordenar alfabéticamente)
     for (const key in payload) {
         const value = payload[key];
         if (urlEncode) {
@@ -46,12 +49,17 @@ function getParameters(payload, timestamp, urlEncode = false) {
             parameters += `${key}=${value}&`;
         }
     }
+    
+    // 2. Quitar el último '&' si hay parámetros
     if (parameters) {
         parameters = parameters.substring(0, parameters.length - 1);
-        parameters = `${parameters}×tamp=${timestamp}`;
+        // 3. Añadir timestamp AL FINAL (NO ordenado)
+        parameters = `${parameters}&timestamp=${timestamp}`;
     } else {
+        // 4. Si no hay parámetros, solo timestamp
         parameters = `timestamp=${timestamp}`;
     }
+    
     return parameters;
 }
 
@@ -79,18 +87,24 @@ function roundToTickSizeUltraPrecise(price, tickSize) {
     return parseFloat(rounded.toFixed(decimalPlaces));
 }
 
-// ========== FUNCIÓN DE COMUNICACIÓN CENTRALIZADA ==========
+// ========== FUNCIÓN DE COMUNICACIÓN OFICIAL ==========
 async function sendRequest(method, path, payload) {
     const timestamp = Date.now();
     
+    // 1. Parámetros para firma (sin encoding)
     const parametersToSign = getParameters(payload, timestamp, false);
+    
+    // 2. Parámetros para URL (con encoding)
     const parametersForUrl = getParameters(payload, timestamp, true);
     
+    // 3. Crear firma
     const signature = sign(parametersToSign);
+    
+    // 4. Construir URL final
     const url = `https://${HOST}${path}?${parametersForUrl}&signature=${signature}`;
 
     const config = {
-        method: method.toUpperCase(),
+        method: method,
         url: url,
         headers: { 'X-BX-APIKEY': API_KEY }
     };
@@ -131,19 +145,41 @@ async function getCurrentPrice(symbol) {
 }
 
 async function getContractInfo(symbol) {
-  const url = `https://${HOST}/openApi/swap/v2/quote/contracts`;
-  const res = await fastAxios.get(url);
-  if (res.data?.code === 0) {
-    const c = res.data.data.find(x => x.symbol === symbol);
-    if (c) return {
-        minOrderQty: parseFloat(c.minOrderQty),
-        tickSize: parseFloat(c.tickSize),
-        stepSize: parseFloat(c.stepSize),
-        minNotional: parseFloat(c.minNotional),
-        maxLeverage: parseInt(c.maxLeverage)
-    };
+  try {
+    const url = `https://${HOST}/openApi/swap/v2/quote/contracts`;
+    const res = await fastAxios.get(url);
+    if (res.data?.code === 0) {
+      const c = res.data.data.find(x => x.symbol === symbol);
+      if (c) {
+        const contractInfo = {
+          minOrderQty: parseFloat(c.minOrderQty) || 0.001,
+          tickSize: parseFloat(c.tickSize) || 0.00001,
+          stepSize: parseFloat(c.stepSize) || 0.001,
+          minNotional: parseFloat(c.minNotional) || 1,
+          maxLeverage: parseInt(c.maxLeverage) || 20
+        };
+        
+        // Verificar que no hay NaN
+        if (isNaN(contractInfo.minOrderQty)) contractInfo.minOrderQty = 0.001;
+        if (isNaN(contractInfo.tickSize)) contractInfo.tickSize = 0.00001;
+        if (isNaN(contractInfo.stepSize)) contractInfo.stepSize = 0.001;
+        
+        return contractInfo;
+      }
+    }
+  } catch (e) {
+    console.log('⚠️ Error obteniendo contrato:', e.message);
   }
-  throw new Error(`Contrato para el símbolo '${symbol}' no encontrado. Verifique el par.`);
+  
+  // Fallback seguro
+  console.log('⚠️ Usando valores por defecto para', symbol);
+  return { 
+    minOrderQty: 0.001, 
+    tickSize: 0.00001,
+    stepSize: 0.001, 
+    minNotional: 1, 
+    maxLeverage: 20
+  };
 }
 
 // ========== LIMPIEZA Y VALIDACIÓN DE DATOS ==========
@@ -167,50 +203,136 @@ function validateWebhookData(data) {
     return data;
 }
 
-// ========== GESTIÓN DE POSICIONES Y ÓRDENES ==========
-async function checkExistingPosition(symbol, newSide) {
-  console.log(`[checkExistingPosition] Verificando ${symbol}...`);
-  const payload = { symbol };
-  const response = await sendRequest('GET', '/openApi/swap/v2/user/positions', payload);
-  
-  if (response?.code === 0 && Array.isArray(response.data)) {
-      const position = response.data[0]; 
-      if (position && parseFloat(position.positionAmt) !== 0) {
-          const positionAmt = parseFloat(position.positionAmt);
-          const existingSide = positionAmt > 0 ? 'LONG' : 'SHORT';
-          console.log(`[checkExistingPosition] Posición encontrada: Lado=${existingSide}, Tamaño=${Math.abs(positionAmt)}`);
-          return { exists: true, side: existingSide, size: Math.abs(positionAmt), entryPrice: parseFloat(position.avgPrice), isReentry: existingSide === newSide };
-      }
-  }
-  console.log(`[checkExistingPosition] No se encontró posición activa para ${symbol}.`);
-  return { exists: false, isReentry: false };
-}
+// ========== GESTIÓN DE POSICIONES MEJORADA (CON LOGS DETALLADOS) ==========
 
 async function getCurrentPositionSize(symbol, positionSide) {
-    console.log(`[getCurrentPositionSize] Verificando ${symbol} para lado ${positionSide}...`);
+  try {
+    console.log(`🔍 [DEBUG] Buscando posición: ${symbol} ${positionSide}`);
+    
+    // 1. Petición específica por símbolo (más directo)
     const payload = { symbol };
     const response = await sendRequest('GET', '/openApi/swap/v2/user/positions', payload);
-
-    if (response?.code === 0 && Array.isArray(response.data)) {
-        const position = response.data[0];
-        if (position) {
-            const positionAmt = parseFloat(position.positionAmt);
+    
+    console.log(`📡 [DEBUG] Respuesta API positions:`, JSON.stringify(response, null, 2));
+    
+    if (response?.code === 0) {
+      // 2. Manejar tanto array como objeto único
+      let positions = response.data;
+      if (!Array.isArray(positions)) {
+        positions = positions ? [positions] : [];
+      }
+      
+      console.log(`📊 [DEBUG] Posiciones encontradas: ${positions.length}`);
+      
+      // 3. Buscar la posición específica
+      for (const position of positions) {
+        console.log(`🔎 [DEBUG] Evaluando posición:`, {
+          symbol: position.symbol,
+          positionAmt: position.positionAmt,
+          avgPrice: position.avgPrice,
+          entryPrice: position.entryPrice
+        });
+        
+        if (position.symbol === symbol) {
+          const positionAmt = parseFloat(position.positionAmt);
+          console.log(`💰 [DEBUG] positionAmt parseado: ${positionAmt}`);
+          
+          if (positionAmt !== 0) {
             const absSize = Math.abs(positionAmt);
             const actualSide = positionAmt > 0 ? 'LONG' : 'SHORT';
             
-            console.log(`[getCurrentPositionSize] API reporta: Lado=${actualSide}, Tamaño=${absSize}`);
+            console.log(`📈 [DEBUG] Comparación de lados:`, {
+              actualSide,
+              expectedSide: positionSide,
+              match: actualSide === positionSide
+            });
             
-            if (actualSide === positionSide && absSize > 0) {
-                console.log(`[getCurrentPositionSize] ¡Coincidencia encontrada! Devolviendo posición.`);
-                return { size: absSize, entryPrice: parseFloat(position.avgPrice) };
+            if (actualSide === positionSide) {
+              // 4. Obtener precio de entrada (probar múltiples campos)
+              let entryPrice = parseFloat(position.avgPrice) || parseFloat(position.entryPrice) || parseFloat(position.markPrice);
+              
+              console.log(`✅ [DEBUG] Posición encontrada:`, {
+                size: absSize,
+                entryPrice: entryPrice,
+                actualSide: actualSide
+              });
+              
+              return { 
+                size: absSize, 
+                entryPrice: entryPrice,
+                actualSide: actualSide 
+              };
             } else {
-                 console.log(`[getCurrentPositionSize] No hay coincidencia de lado (Esperado: ${positionSide}) o el tamaño es 0.`);
+              console.log(`⚠️ [DEBUG] Lado no coincide: esperado ${positionSide}, encontrado ${actualSide}`);
             }
+          } else {
+            console.log(`⚠️ [DEBUG] Posición con cantidad 0: ${positionAmt}`);
+          }
         }
+      }
+      
+      console.log(`❌ [DEBUG] No se encontró posición válida para ${symbol} ${positionSide}`);
     } else {
-        console.log(`[getCurrentPositionSize] Respuesta de API inválida o sin datos. Código: ${response?.code}, Mensaje: ${response?.msg}`);
+      console.log(`❌ [DEBUG] Error en respuesta API:`, response);
     }
+    
     return null;
+  } catch (error) {
+    console.error('❌ [DEBUG] Error en getCurrentPositionSize:', error.message);
+    return null;
+  }
+}
+
+async function checkExistingPosition(symbol, newSide) {
+  try {
+    console.log(`🔍 [DEBUG] Verificando posición existente: ${symbol} para ${newSide}`);
+    
+    const payload = { symbol };
+    const response = await sendRequest('GET', '/openApi/swap/v2/user/positions', payload);
+    
+    console.log(`📡 [DEBUG] Respuesta checkExistingPosition:`, JSON.stringify(response, null, 2));
+    
+    if (response?.code === 0) {
+      let positions = response.data;
+      if (!Array.isArray(positions)) {
+        positions = positions ? [positions] : [];
+      }
+      
+      for (const position of positions) {
+        if (position.symbol === symbol) {
+          const positionAmt = parseFloat(position.positionAmt);
+          
+          if (positionAmt !== 0) {
+            const existingSide = positionAmt > 0 ? 'LONG' : 'SHORT';
+            const size = Math.abs(positionAmt);
+            const entryPrice = parseFloat(position.avgPrice) || parseFloat(position.entryPrice);
+            const isReentry = existingSide === newSide;
+            
+            console.log(`📊 [DEBUG] Posición existente encontrada:`, {
+              side: existingSide,
+              size: size,
+              entryPrice: entryPrice,
+              isReentry: isReentry
+            });
+            
+            return { 
+              exists: true, 
+              side: existingSide, 
+              size: size, 
+              entryPrice: entryPrice, 
+              isReentry: isReentry 
+            };
+          }
+        }
+      }
+    }
+    
+    console.log(`📊 [DEBUG] No existe posición previa para ${symbol}`);
+    return { exists: false, isReentry: false };
+  } catch (error) {
+    console.error('❌ [DEBUG] Error en checkExistingPosition:', error.message);
+    return { exists: false, isReentry: false };
+  }
 }
 
 async function cancelAllTPSLOrders(symbol) {
@@ -312,7 +434,7 @@ async function dynamicTrailingStop({ symbol, avgEntryPrice, posSide, positionSiz
     return false;
 }
 
-// ========== FUNCIÓN PRINCIPAL DE ORDEN (VERSIÓN FINAL) ==========
+// ========== FUNCIÓN PRINCIPAL MEJORADA (CON FALLBACK PARA TP/SL) ==========
 async function placeOrder(params) {
   console.log('\n🚀 === INICIANDO PROCESO DE ORDEN AVANZADO ===');
   
@@ -347,26 +469,62 @@ async function placeOrder(params) {
   if (orderResp.code !== 0) throw new Error(`Error API en orden principal: ${orderResp.msg}`);
   console.log('✅ Orden principal ejecutada.');
 
+  // ========== VERIFICACIÓN DE POSICIÓN MEJORADA ==========
   console.log('\n⏳ Esperando que BingX confirme y consolide la posición...');
   let confirmedPosition = null;
-  for (let i = 0; i < 15; i++) {
+  let maxAttempts = 20; // Aumentado de 15 a 20
+  
+  for (let i = 0; i < maxAttempts; i++) {
+    console.log(`🔄 [DEBUG] Intento ${i + 1}/${maxAttempts} verificando posición...`);
     await new Promise(r => setTimeout(r, 2000));
+    
     confirmedPosition = await getCurrentPositionSize(symbol, posSide);
     if (confirmedPosition) {
       console.log(`✅ Posición confirmada en intento ${i + 1}: Tamaño=${confirmedPosition.size}, Precio=${confirmedPosition.entryPrice}`);
       break;
     }
+    
+    // 🛡️ FALLBACK: Intentar con cualquier posición del símbolo (sin filtrar por lado)
+    if (i >= 10) {
+      console.log(`⚠️ [DEBUG] Intento ${i + 1}: Buscando ANY posición para ${symbol}...`);
+      const anyPosition = await sendRequest('GET', '/openApi/swap/v2/user/positions', { symbol });
+      
+      if (anyPosition?.code === 0 && anyPosition.data) {
+        let positions = Array.isArray(anyPosition.data) ? anyPosition.data : [anyPosition.data];
+        const foundPosition = positions.find(p => p.symbol === symbol && parseFloat(p.positionAmt) !== 0);
+        
+        if (foundPosition) {
+          const positionAmt = parseFloat(foundPosition.positionAmt);
+          console.log(`🎯 [FALLBACK] Encontrada posición: ${Math.abs(positionAmt)} en lado ${positionAmt > 0 ? 'LONG' : 'SHORT'}`);
+          
+          confirmedPosition = {
+            size: Math.abs(positionAmt),
+            entryPrice: parseFloat(foundPosition.avgPrice) || parseFloat(foundPosition.entryPrice) || marketPrice
+          };
+          break;
+        }
+      }
+    }
   }
+  
+  // ========== MANEJO ROBUSTO SI NO SE ENCUENTRA POSICIÓN ==========
   if (!confirmedPosition) {
-    throw new Error("Fallo crítico: No se pudo verificar la posición para establecer TP/SL.");
+    console.log('⚠️ No se pudo verificar la posición específica, pero la orden principal se ejecutó.');
+    console.log('🎯 Continuando con TP/SL usando datos calculados...');
+    
+    // Usar datos calculados como fallback
+    confirmedPosition = {
+      size: quantityToOrder,
+      entryPrice: marketPrice
+    };
   }
   
   const { size: posQty, entryPrice: avgEntryPrice } = confirmedPosition;
 
+  // ========== TP/SL Y TRAILING ==========
   if (trailingMode) {
     console.log("\n▶️ Iniciando Trailing Stop en segundo plano...");
     const trailingParams = { symbol, avgEntryPrice, posSide, positionSize: posQty, tickSize: contract.tickSize, trailingPercent, minDistancePercent };
-    // Ejecutar sin await para que no bloquee la respuesta
     if (trailingMode === 'dynamic') {
         dynamicTrailingStop(trailingParams);
     } else if (trailingMode === 'be') {
