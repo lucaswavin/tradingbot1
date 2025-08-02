@@ -1,7 +1,7 @@
 // --- DEPENDENCIAS Y CONFIGURACIÓN INICIAL ---
 require('dotenv').config();
 const axios = require('axios');
-const crypto =require('crypto');
+const crypto = require('crypto');
 const https = require('https');
 
 const API_KEY = process.env.BINGX_API_KEY;
@@ -22,10 +22,11 @@ const fastAxios = axios.create({
   timeout: 8000,
   headers: {
     'Connection': 'keep-alive',
+    'Content-Type': 'application/x-www-form-urlencoded'
   }
 });
 
-// ========== UTILS (CON LÓGICA DE FIRMA OFICIAL DE BINGX) ==========
+// ========== UTILS (NUEVA LÓGICA DE FIRMA CORRECTA) ==========
 
 function normalizeSymbol(symbol) {
   if (!symbol) return symbol;
@@ -36,28 +37,37 @@ function normalizeSymbol(symbol) {
   return base;
 }
 
-function createOfficialQueryString(payload, urlEncode = false) {
-    // NO ORDENAR LAS CLAVES. Usar el orden de inserción.
-    let parameters = "";
-    for (const key in payload) {
-        const value = payload[key];
-        if (urlEncode) {
-            parameters += `${key}=${encodeURIComponent(value)}&`;
-        } else {
-            parameters += `${key}=${value}&`;
-        }
-    }
-    // Quitar el último '&'
-    if (parameters) {
-        parameters = parameters.substring(0, parameters.length - 1);
-    }
-    return parameters;
-}
+// 🔧 NUEVA FUNCIÓN DE FIRMA PROFESIONAL (basada en el estándar oficial de BingX)
+function createParamsAndSignature(payload) {
+    // 1. Añadir el timestamp al objeto de parámetros
+    const paramsWithTimestamp = {
+        ...payload,
+        timestamp: Date.now(),
+    };
 
-function sign(paramsString) {
-    return crypto.createHmac('sha256', API_SECRET)
-                 .update(paramsString)
-                 .digest('hex');
+    // 2. Ordenar todas las claves alfabéticamente (incluyendo 'timestamp')
+    const sortedKeys = Object.keys(paramsWithTimestamp).sort();
+
+    // 3. Construir la cadena de consulta para la firma (sin codificar URL)
+    const queryStringToSign = sortedKeys
+        .map(key => `${key}=${paramsWithTimestamp[key]}`)
+        .join('&');
+
+    // 4. Construir la cadena de consulta para la petición (codificando URL)
+    const queryStringForRequest = sortedKeys
+        .map(key => `${key}=${encodeURIComponent(paramsWithTimestamp[key])}`)
+        .join('&');
+    
+    // 5. Crear la firma usando la cadena SIN codificar
+    const signature = crypto.createHmac('sha256', API_SECRET)
+                           .update(queryStringToSign)
+                           .digest('hex');
+
+    // 6. Devolver la cadena para la petición y la firma por separado
+    return {
+        queryString: queryStringForRequest,
+        signature: signature
+    };
 }
 
 function getDecimalPlacesForTickSize(tickSize) {
@@ -78,49 +88,28 @@ function roundToTickSizeUltraPrecise(price, tickSize) {
     return parseFloat(rounded.toFixed(decimalPlaces));
 }
 
-// ========== FUNCIÓN DE COMUNICACIÓN CENTRALIZADA ==========
-async function sendRequest(method, path, payload) {
-    const timestamp = Date.now();
-    let queryStringToSign = createOfficialQueryString(payload);
-    queryStringToSign = queryStringToSign ? `${queryStringToSign}×tamp=${timestamp}` : `timestamp=${timestamp}`;
-
-    let queryStringForUrl = createOfficialQueryString(payload, true);
-    queryStringForUrl = queryStringForUrl ? `${queryStringForUrl}×tamp=${timestamp}` : `timestamp=${timestamp}`;
-
-    const signature = sign(queryStringToSign);
-    const url = `https://${HOST}${path}?${queryStringForUrl}&signature=${signature}`;
-
-    const config = {
-        method: method,
-        url: url,
-        headers: { 'X-BX-APIKEY': API_KEY }
-    };
-    
-    if (method.toUpperCase() === 'POST') {
-        config.data = '';
-        config.headers['Content-Type'] = 'application/x-www-form-urlencoded';
-    }
-
-    try {
-        const response = await fastAxios(config);
-        return response.data;
-    } catch (err) {
-        console.error(`❌ Error en la petición a ${path}:`, err.response?.data || err.message);
-        return err.response?.data || { code: -1, msg: err.message };
-    }
-}
-
-// ========== FUNCIONES DE LA API ==========
+// ========== FUNCIONES DE LA API (ACTUALIZADAS CON NUEVA FIRMA) ==========
 
 async function setLeverage(symbol, leverage = 5, side = 'LONG') {
+  if (!API_KEY || !API_SECRET) throw new Error('API key/secret no configurados');
   leverage = Math.max(1, Math.min(125, Number(leverage)));
+  
   const payload = { symbol, side, leverage };
-  console.log(`🔧 Configurando leverage ${leverage}x para ${symbol} (${side})`);
-  const resp = await sendRequest('POST', '/openApi/swap/v2/trade/leverage', payload);
-  if (resp.code === 0) {
+  const { queryString, signature } = createParamsAndSignature(payload);
+  const url = `https://${HOST}/openApi/swap/v2/trade/leverage`;
+  const data = `${queryString}&signature=${signature}`;
+
+  try {
+    console.log(`🔧 Configurando leverage ${leverage}x para ${symbol} (${side})`);
+    const resp = await fastAxios.post(url, data, { headers: { 'X-BX-APIKEY': API_KEY } });
+    
+    if (resp.data?.code === 0) {
       console.log(`✅ Leverage configurado exitosamente: ${leverage}x`);
-  } else {
-      console.log(`⚠️ Respuesta de leverage no exitosa:`, resp.msg);
+    } else {
+      console.log(`⚠️ Respuesta de leverage no exitosa:`, resp.data.msg);
+    }
+  } catch (err) {
+    console.error('❌ Error en setLeverage:', err.response?.data || err.message);
   }
 }
 
@@ -132,83 +121,167 @@ async function getCurrentPrice(symbol) {
 }
 
 async function getContractInfo(symbol) {
-  const url = `https://${HOST}/openApi/swap/v2/quote/contracts`;
-  const res = await fastAxios.get(url);
-  if (res.data?.code === 0) {
-    const c = res.data.data.find(x => x.symbol === symbol);
-    if (c) return {
-        minOrderQty: parseFloat(c.minOrderQty),
-        tickSize: parseFloat(c.tickSize),
-        stepSize: parseFloat(c.stepSize),
-        minNotional: parseFloat(c.minNotional),
-        maxLeverage: parseInt(c.maxLeverage)
-    };
+  try {
+    const url = `https://${HOST}/openApi/swap/v2/quote/contracts`;
+    const res = await fastAxios.get(url);
+    if (res.data?.code === 0) {
+      const c = res.data.data.find(x => x.symbol === symbol);
+      if (c) {
+        const contractInfo = {
+          minOrderQty: parseFloat(c.minOrderQty) || 0.001,
+          tickSize: parseFloat(c.tickSize) || 0.00001,
+          stepSize: parseFloat(c.stepSize) || 0.001,
+          minNotional: parseFloat(c.minNotional) || 1,
+          maxLeverage: parseInt(c.maxLeverage) || 20
+        };
+        
+        // Verificar que no hay NaN
+        if (isNaN(contractInfo.minOrderQty)) contractInfo.minOrderQty = 0.001;
+        if (isNaN(contractInfo.tickSize)) contractInfo.tickSize = 0.00001;
+        if (isNaN(contractInfo.stepSize)) contractInfo.stepSize = 0.001;
+        
+        return contractInfo;
+      }
+    }
+  } catch (e) {
+    console.log('⚠️ Error obteniendo contrato:', e.message);
   }
-  throw new Error(`Contrato para el símbolo '${symbol}' no encontrado. Verifique el par.`);
+  
+  // Fallback seguro
+  console.log('⚠️ Usando valores por defecto para', symbol);
+  return { 
+    minOrderQty: 0.001, 
+    tickSize: 0.00001,
+    stepSize: 0.001, 
+    minNotional: 1, 
+    maxLeverage: 20
+  };
 }
 
 // ========== LIMPIEZA Y VALIDACIÓN DE DATOS ==========
-function cleanWebhookData(rawData) { /* ... tu lógica ... */ return rawData; }
-function validateWebhookData(data) { /* ... tu lógica ... */ return data; }
+function cleanWebhookData(rawData) {
+    console.log('🧹 Limpiando datos del webhook...');
+    const cleanData = {};
+    for (const [key, value] of Object.entries(rawData)) {
+        if (!cleanData.hasOwnProperty(key)) {
+            cleanData[key] = value;
+        }
+    }
+    console.log('✅ Datos limpios:', JSON.stringify(cleanData, null, 2));
+    return cleanData;
+}
 
-// ========== GESTIÓN DE POSICIONES Y ÓRDENES ==========
+function validateWebhookData(data) {
+    console.log('🔍 Validando datos del webhook...');
+    const required = ['symbol', 'side'];
+    const missing = required.filter(field => !data[field]);
+    if (missing.length > 0) throw new Error(`Campos requeridos faltantes: ${missing.join(', ')}`);
+    return data;
+}
+
+// ========== GESTIÓN DE POSICIONES Y ÓRDENES (ACTUALIZADAS) ==========
 async function checkExistingPosition(symbol, newSide) {
-  const payload = { symbol };
-  const response = await sendRequest('GET', '/openApi/swap/v2/user/positions', payload);
-  if (response?.code === 0 && Array.isArray(response.data)) {
-      const position = response.data.find(p => p.symbol === symbol && parseFloat(p.positionAmt) !== 0);
-      if (position) {
-          const positionAmt = parseFloat(position.positionAmt);
-          const existingSide = positionAmt > 0 ? 'LONG' : 'SHORT';
-          return { exists: true, side: existingSide, size: Math.abs(positionAmt), entryPrice: parseFloat(position.avgPrice), isReentry: existingSide === newSide };
-      }
+  try {
+    const payload = { symbol };
+    const { queryString, signature } = createParamsAndSignature(payload);
+    const url = `https://${HOST}/openApi/swap/v2/user/positions?${queryString}&signature=${signature}`;
+    const response = await fastAxios.get(url, { headers: { 'X-BX-APIKEY': API_KEY } });
+
+    if (response.data?.code === 0 && Array.isArray(response.data.data)) {
+        const position = response.data.data.find(p => p.symbol === symbol && parseFloat(p.positionAmt) !== 0);
+        if (position) {
+            const positionAmt = parseFloat(position.positionAmt);
+            const existingSide = positionAmt > 0 ? 'LONG' : 'SHORT';
+            return {
+                exists: true,
+                side: existingSide,
+                size: Math.abs(positionAmt),
+                entryPrice: parseFloat(position.avgPrice),
+                isReentry: existingSide === newSide,
+            };
+        }
+    }
+    return { exists: false, isReentry: false };
+  } catch (error) {
+    console.error('❌ Error verificando posición:', error.response?.data?.msg || error.message);
+    return { exists: false, isReentry: false };
   }
-  return { exists: false, isReentry: false };
 }
 
 async function getCurrentPositionSize(symbol, positionSide) {
-  const response = await sendRequest('GET', '/openApi/swap/v2/user/positions', {});
-  if (response?.code === 0 && Array.isArray(response.data)) {
-      const position = response.data.find(p => p.symbol === symbol);
-      if (position) {
-          const positionAmt = parseFloat(position.positionAmt);
-          const actualSide = positionAmt > 0 ? 'LONG' : 'SHORT';
-          if (actualSide === positionSide) {
-              return { size: Math.abs(positionAmt), entryPrice: parseFloat(position.avgPrice) };
-          }
-      }
+  try {
+    const { queryString, signature } = createParamsAndSignature({});
+    const url = `https://${HOST}/openApi/swap/v2/user/positions?${queryString}&signature=${signature}`;
+    const response = await fastAxios.get(url, { headers: { 'X-BX-APIKEY': API_KEY } });
+
+    if (response.data?.code === 0 && Array.isArray(response.data.data)) {
+        const position = response.data.data.find(p => p.symbol === symbol);
+        if (position) {
+            const positionAmt = parseFloat(position.positionAmt);
+            const absSize = Math.abs(positionAmt);
+            const actualSide = positionAmt > 0 ? 'LONG' : 'SHORT';
+            if (actualSide === positionSide) {
+                return { size: absSize, entryPrice: parseFloat(position.avgPrice) };
+            }
+        }
+    }
+    return null;
+  } catch (error) {
+    console.error('❌ Error obteniendo tamaño de posición:', error.response?.data?.msg || error.message);
+    return null;
   }
-  return null;
 }
 
 async function cancelAllTPSLOrders(symbol) {
-  const payload = { symbol };
-  const res = await sendRequest('POST', '/openApi/swap/v2/trade/stopOrder/cancelAll', payload);
-  if (res.code === 0) {
-      const count = res.data.success?.length || 0;
-      console.log(`✅ ${count} órdenes TP/SL para ${symbol} canceladas.`);
-      return count;
+  try {
+    const payload = { symbol };
+    const { queryString, signature } = createParamsAndSignature(payload);
+    const url = `https://${HOST}/openApi/swap/v2/trade/stopOrder/cancelAll`;
+    const data = `${queryString}&signature=${signature}`;
+    const res = await fastAxios.post(url, data, { headers: { 'X-BX-APIKEY': API_KEY } });
+    if (res.data.code === 0) {
+        const count = res.data.data.success?.length || 0;
+        console.log(`✅ ${count} órdenes TP/SL para ${symbol} canceladas.`);
+        return count;
+    }
+  } catch (e) {
+    console.error(`❌ Error cancelando órdenes TP/SL para ${symbol}:`, e.response?.data?.msg || e.message);
   }
   return 0;
 }
 
 async function getUSDTBalance() {
-  const res = await sendRequest('GET', '/openApi/swap/v2/user/balance', {});
-  if (res.code === 0 && res.data?.balance) {
-    return parseFloat(res.data.balance.balance);
+  try {
+    const { queryString, signature } = createParamsAndSignature({});
+    const url = `https://${HOST}/openApi/swap/v2/user/balance?${queryString}&signature=${signature}`;
+    const res = await fastAxios.get(url, { headers: { 'X-BX-APIKEY': API_KEY } });
+    if (res.data.code === 0 && res.data.data?.balance) {
+      return parseFloat(res.data.data.balance.balance);
+    }
+    return 0;
+  } catch (error) {
+    console.error('❌ Error obteniendo balance USDT:', error.response?.data?.msg || error.message);
+    return 0;
   }
-  return 0;
 }
 
 async function closeAllPositions(symbol) {
-  const sym = normalizeSymbol(symbol);
-  const payload = { symbol: sym };
-  const res = await sendRequest('POST', '/openApi/swap/v2/trade/closeAllPositions', payload);
-  console.log(`✅ Solicitud de cerrar todas las posiciones para ${sym} enviada.`);
-  return res;
+  try {
+    const sym = normalizeSymbol(symbol);
+    const payload = { symbol: sym };
+    const { queryString, signature } = createParamsAndSignature(payload);
+    const url = `https://${HOST}/openApi/swap/v2/trade/closeAllPositions`;
+    const data = `${queryString}&signature=${signature}`;
+    const res = await fastAxios.post(url, data, { headers: { 'X-BX-APIKEY': API_KEY } });
+    console.log(`✅ Solicitud de cerrar todas las posiciones para ${sym} enviada.`);
+    return res.data;
+  } catch (err) {
+    console.error('❌ Error en closeAllPositions:', err.response?.data || err.message);
+    throw err;
+  }
 }
 
-// ========== TRAILING STOPS ==========
+// ========== TRAILING STOPS (ACTUALIZADOS) ==========
 async function trailingStopToBE({ symbol, avgEntryPrice, posSide, positionSize, tickSize, trailingPercent = 1, pollMs = 4000, maxAttempts = 60 }) {
     if (!trailingPercent) return;
     console.log(`🚦 Iniciando Trailing a Break-Even para ${symbol} si avanza ${trailingPercent}%...`);
@@ -223,7 +296,9 @@ async function trailingStopToBE({ symbol, avgEntryPrice, posSide, positionSize, 
                 await cancelAllTPSLOrders(symbol);
                 const newSL = roundToTickSizeUltraPrecise(avgEntryPrice, tickSize);
                 const payload = { symbol, side: posSide === 'LONG' ? 'SELL' : 'BUY', positionSide: posSide, type: 'STOP_MARKET', quantity: positionSize, stopPrice: newSL, workingType: 'MARK_PRICE' };
-                await sendRequest('POST', '/openApi/swap/v2/trade/order', payload);
+                const { queryString, signature } = createParamsAndSignature(payload);
+                const data = `${queryString}&signature=${signature}`;
+                await fastAxios.post(`https://${HOST}/openApi/swap/v2/trade/order`, data, { headers: { 'X-BX-APIKEY': API_KEY } });
                 console.log(`✅ SL movido a BE (${newSL}) tras avance de ${trailingPercent}%`);
                 return true;
             }
@@ -249,15 +324,16 @@ async function dynamicTrailingStop({ symbol, avgEntryPrice, posSide, positionSiz
         try {
             const price = await getCurrentPrice(symbol);
             let newSL;
-            const payloadBase = { symbol, positionSide: posSide, type: 'STOP_MARKET', quantity: positionSize, workingType: 'MARK_PRICE' };
 
             if (posSide === 'LONG') {
                 if (price > extremumPrice) extremumPrice = price;
                 newSL = roundToTickSizeUltraPrecise(extremumPrice * (1 - minDistancePercent / 100), tickSize);
                 if (price >= initialTriggerPrice && newSL > activeSL) {
                     await cancelAllTPSLOrders(symbol);
-                    const payload = { ...payloadBase, side: 'SELL', stopPrice: newSL };
-                    await sendRequest('POST', '/openApi/swap/v2/trade/order', payload);
+                    const payload = { symbol, side: 'SELL', positionSide: 'LONG', type: 'STOP_MARKET', quantity: positionSize, stopPrice: newSL, workingType: 'MARK_PRICE' };
+                    const { queryString, signature } = createParamsAndSignature(payload);
+                    const data = `${queryString}&signature=${signature}`;
+                    await fastAxios.post(`https://${HOST}/openApi/swap/v2/trade/order`, data, { headers: { 'X-BX-APIKEY': API_KEY } });
                     console.log(`⏩ Trailing LONG SL actualizado: ${newSL} (precio máximo: ${extremumPrice})`);
                     activeSL = newSL;
                 }
@@ -266,8 +342,10 @@ async function dynamicTrailingStop({ symbol, avgEntryPrice, posSide, positionSiz
                 newSL = roundToTickSizeUltraPrecise(extremumPrice * (1 + minDistancePercent / 100), tickSize);
                 if (price <= initialTriggerPrice && newSL < activeSL) {
                     await cancelAllTPSLOrders(symbol);
-                    const payload = { ...payloadBase, side: 'BUY', stopPrice: newSL };
-                    await sendRequest('POST', '/openApi/swap/v2/trade/order', payload);
+                    const payload = { symbol, side: 'BUY', positionSide: 'SHORT', type: 'STOP_MARKET', quantity: positionSize, stopPrice: newSL, workingType: 'MARK_PRICE' };
+                    const { queryString, signature } = createParamsAndSignature(payload);
+                    const data = `${queryString}&signature=${signature}`;
+                    await fastAxios.post(`https://${HOST}/openApi/swap/v2/trade/order`, data, { headers: { 'X-BX-APIKEY': API_KEY } });
                     console.log(`⏩ Trailing SHORT SL actualizado: ${newSL} (precio mínimo: ${extremumPrice})`);
                     activeSL = newSL;
                 }
@@ -280,7 +358,7 @@ async function dynamicTrailingStop({ symbol, avgEntryPrice, posSide, positionSiz
     return false;
 }
 
-// ========== FUNCIÓN PRINCIPAL DE ORDEN (VERSIÓN FINAL) ==========
+// ========== FUNCIÓN PRINCIPAL DE ORDEN (VERSIÓN FINAL CON FIRMA CORRECTA) ==========
 async function placeOrder(params) {
   console.log('\n🚀 === INICIANDO PROCESO DE ORDEN AVANZADO ===');
   
@@ -309,10 +387,13 @@ async function placeOrder(params) {
   }
 
   const mainPayload = { symbol, side: side.toUpperCase(), positionSide: posSide, type, quantity: quantityToOrder };
+  const { queryString, signature } = createParamsAndSignature(mainPayload);
+  const data = `${queryString}&signature=${signature}`;
+  const mainUrl = `https://${HOST}/openApi/swap/v2/trade/order`;
   
   console.log('\n📤 Enviando orden principal...');
-  const orderResp = await sendRequest('POST', '/openApi/swap/v2/trade/order', mainPayload);
-  if (orderResp.code !== 0) throw new Error(`Error API en orden principal: ${orderResp.msg}`);
+  const orderResp = await fastAxios.post(mainUrl, data, { headers: { 'X-BX-APIKEY': API_KEY } });
+  if (orderResp.data?.code !== 0) throw new Error(`Error API en orden principal: ${orderResp.data.msg}`);
   console.log('✅ Orden principal ejecutada.');
 
   console.log('\n⏳ Esperando que BingX confirme y consolide la posición...');
@@ -340,22 +421,28 @@ async function placeOrder(params) {
   } else if (tpPercent || slPercent) {
     console.log('\n🎯 Configurando TP/SL fijos...');
     const sltpSide = posSide === 'LONG' ? 'SELL' : 'BUY';
-    const orderPromises = [];
     if (tpPercent > 0) {
       const finalTpPrice = roundToTickSizeUltraPrecise(avgEntryPrice * (posSide === 'LONG' ? 1 + tpPercent / 100 : 1 - tpPercent / 100), contract.tickSize);
       const payload = { symbol, positionSide: posSide, side: sltpSide, type: 'TAKE_PROFIT_MARKET', quantity: posQty, stopPrice: finalTpPrice, workingType: 'MARK_PRICE' };
-      orderPromises.push(sendRequest('POST', '/openApi/swap/v2/trade/order', payload).then(res => console.log(res.code === 0 ? `✅ TP configurado en ${finalTpPrice}` : `❌ Error TP: ${res.msg}`)));
+      const { queryString, signature } = createParamsAndSignature(payload);
+      const data = `${queryString}&signature=${signature}`;
+      fastAxios.post(`https://${HOST}/openApi/swap/v2/trade/order`, data, { headers: { 'X-BX-APIKEY': API_KEY } })
+        .then(res => console.log(res.data?.code === 0 ? `✅ TP configurado en ${finalTpPrice}` : `❌ Error TP: ${res.data.msg}`))
+        .catch(err => console.error(`❌ Error fatal TP: ${err.message}`));
     }
     if (slPercent > 0) {
       const finalSlPrice = roundToTickSizeUltraPrecise(avgEntryPrice * (posSide === 'LONG' ? 1 - slPercent / 100 : 1 + slPercent / 100), contract.tickSize);
-      const payload = { symbol, positionSide: posSide, side: sltpSide, type: 'STOP_MARKET', quantity: posQty, stopPrice: finalSlPrice, workingType: 'MARK_PRICE' };
-      orderPromises.push(sendRequest('POST', '/openApi/swap/v2/trade/order', payload).then(res => console.log(res.code === 0 ? `✅ SL configurado en ${finalSlPrice}` : `❌ Error SL: ${res.msg}`)));
+       const payload = { symbol, positionSide: posSide, side: sltpSide, type: 'STOP_MARKET', quantity: posQty, stopPrice: finalSlPrice, workingType: 'MARK_PRICE' };
+      const { queryString, signature } = createParamsAndSignature(payload);
+      const data = `${queryString}&signature=${signature}`;
+      fastAxios.post(`https://${HOST}/openApi/swap/v2/trade/order`, data, { headers: { 'X-BX-APIKEY': API_KEY } })
+        .then(res => console.log(res.data?.code === 0 ? `✅ SL configurado en ${finalSlPrice}` : `❌ Error SL: ${res.data.msg}`))
+        .catch(err => console.error(`❌ Error fatal SL: ${err.message}`));
     }
-    await Promise.all(orderPromises);
   }
 
   console.log('\n✅ === PROCESO DE ORDEN FINALIZADO ===');
-  return { mainOrder: orderResp, finalPosition: confirmedPosition, trailingActivated: !!trailingMode };
+  return { mainOrder: orderResp.data, finalPosition: confirmedPosition, trailingActivated: !!trailingMode };
 }
 
 // ========== EXPORTACIONES COMPLETAS ==========
