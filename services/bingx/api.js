@@ -36,11 +36,8 @@ function normalizeSymbol(symbol) {
   return base;
 }
 
-// 🔧 FUNCIÓN OFICIAL DE BINGX (basada en su documentación)
 function getParameters(payload, timestamp, urlEncode = false) {
     let parameters = "";
-    
-    // 1. Recorrer payload en orden de inserción (NO ordenar alfabéticamente)
     for (const key in payload) {
         const value = payload[key];
         if (urlEncode) {
@@ -49,17 +46,12 @@ function getParameters(payload, timestamp, urlEncode = false) {
             parameters += `${key}=${value}&`;
         }
     }
-    
-    // 2. Quitar el último '&' si hay parámetros
     if (parameters) {
         parameters = parameters.substring(0, parameters.length - 1);
-        // 3. Añadir timestamp AL FINAL (NO ordenado)
-        parameters = `${parameters}&timestamp=${timestamp}`;
+        parameters = `${parameters}×tamp=${timestamp}`;
     } else {
-        // 4. Si no hay parámetros, solo timestamp
         parameters = `timestamp=${timestamp}`;
     }
-    
     return parameters;
 }
 
@@ -87,24 +79,18 @@ function roundToTickSizeUltraPrecise(price, tickSize) {
     return parseFloat(rounded.toFixed(decimalPlaces));
 }
 
-// ========== FUNCIÓN DE COMUNICACIÓN OFICIAL ==========
+// ========== FUNCIÓN DE COMUNICACIÓN CENTRALIZADA ==========
 async function sendRequest(method, path, payload) {
     const timestamp = Date.now();
     
-    // 1. Parámetros para firma (sin encoding)
     const parametersToSign = getParameters(payload, timestamp, false);
-    
-    // 2. Parámetros para URL (con encoding)
     const parametersForUrl = getParameters(payload, timestamp, true);
     
-    // 3. Crear firma
     const signature = sign(parametersToSign);
-    
-    // 4. Construir URL final
     const url = `https://${HOST}${path}?${parametersForUrl}&signature=${signature}`;
 
     const config = {
-        method: method,
+        method: method.toUpperCase(),
         url: url,
         headers: { 'X-BX-APIKEY': API_KEY }
     };
@@ -145,41 +131,19 @@ async function getCurrentPrice(symbol) {
 }
 
 async function getContractInfo(symbol) {
-  try {
-    const url = `https://${HOST}/openApi/swap/v2/quote/contracts`;
-    const res = await fastAxios.get(url);
-    if (res.data?.code === 0) {
-      const c = res.data.data.find(x => x.symbol === symbol);
-      if (c) {
-        const contractInfo = {
-          minOrderQty: parseFloat(c.minOrderQty) || 0.001,
-          tickSize: parseFloat(c.tickSize) || 0.00001,
-          stepSize: parseFloat(c.stepSize) || 0.001,
-          minNotional: parseFloat(c.minNotional) || 1,
-          maxLeverage: parseInt(c.maxLeverage) || 20
-        };
-        
-        // Verificar que no hay NaN
-        if (isNaN(contractInfo.minOrderQty)) contractInfo.minOrderQty = 0.001;
-        if (isNaN(contractInfo.tickSize)) contractInfo.tickSize = 0.00001;
-        if (isNaN(contractInfo.stepSize)) contractInfo.stepSize = 0.001;
-        
-        return contractInfo;
-      }
-    }
-  } catch (e) {
-    console.log('⚠️ Error obteniendo contrato:', e.message);
+  const url = `https://${HOST}/openApi/swap/v2/quote/contracts`;
+  const res = await fastAxios.get(url);
+  if (res.data?.code === 0) {
+    const c = res.data.data.find(x => x.symbol === symbol);
+    if (c) return {
+        minOrderQty: parseFloat(c.minOrderQty),
+        tickSize: parseFloat(c.tickSize),
+        stepSize: parseFloat(c.stepSize),
+        minNotional: parseFloat(c.minNotional),
+        maxLeverage: parseInt(c.maxLeverage)
+    };
   }
-  
-  // Fallback seguro
-  console.log('⚠️ Usando valores por defecto para', symbol);
-  return { 
-    minOrderQty: 0.001, 
-    tickSize: 0.00001,
-    stepSize: 0.001, 
-    minNotional: 1, 
-    maxLeverage: 20
-  };
+  throw new Error(`Contrato para el símbolo '${symbol}' no encontrado. Verifique el par.`);
 }
 
 // ========== LIMPIEZA Y VALIDACIÓN DE DATOS ==========
@@ -205,38 +169,48 @@ function validateWebhookData(data) {
 
 // ========== GESTIÓN DE POSICIONES Y ÓRDENES ==========
 async function checkExistingPosition(symbol, newSide) {
+  console.log(`[checkExistingPosition] Verificando ${symbol}...`);
   const payload = { symbol };
   const response = await sendRequest('GET', '/openApi/swap/v2/user/positions', payload);
+  
   if (response?.code === 0 && Array.isArray(response.data)) {
-      const position = response.data.find(p => p.symbol === symbol && parseFloat(p.positionAmt) !== 0);
-      if (position) {
+      const position = response.data[0]; 
+      if (position && parseFloat(position.positionAmt) !== 0) {
           const positionAmt = parseFloat(position.positionAmt);
           const existingSide = positionAmt > 0 ? 'LONG' : 'SHORT';
-          return { 
-            exists: true, 
-            side: existingSide, 
-            size: Math.abs(positionAmt), 
-            entryPrice: parseFloat(position.avgPrice), 
-            isReentry: existingSide === newSide 
-          };
+          console.log(`[checkExistingPosition] Posición encontrada: Lado=${existingSide}, Tamaño=${Math.abs(positionAmt)}`);
+          return { exists: true, side: existingSide, size: Math.abs(positionAmt), entryPrice: parseFloat(position.avgPrice), isReentry: existingSide === newSide };
       }
   }
+  console.log(`[checkExistingPosition] No se encontró posición activa para ${symbol}.`);
   return { exists: false, isReentry: false };
 }
 
 async function getCurrentPositionSize(symbol, positionSide) {
-  const response = await sendRequest('GET', '/openApi/swap/v2/user/positions', {});
-  if (response?.code === 0 && Array.isArray(response.data)) {
-      const position = response.data.find(p => p.symbol === symbol);
-      if (position) {
-          const positionAmt = parseFloat(position.positionAmt);
-          const actualSide = positionAmt > 0 ? 'LONG' : 'SHORT';
-          if (actualSide === positionSide) {
-              return { size: Math.abs(positionAmt), entryPrice: parseFloat(position.avgPrice) };
-          }
-      }
-  }
-  return null;
+    console.log(`[getCurrentPositionSize] Verificando ${symbol} para lado ${positionSide}...`);
+    const payload = { symbol };
+    const response = await sendRequest('GET', '/openApi/swap/v2/user/positions', payload);
+
+    if (response?.code === 0 && Array.isArray(response.data)) {
+        const position = response.data[0];
+        if (position) {
+            const positionAmt = parseFloat(position.positionAmt);
+            const absSize = Math.abs(positionAmt);
+            const actualSide = positionAmt > 0 ? 'LONG' : 'SHORT';
+            
+            console.log(`[getCurrentPositionSize] API reporta: Lado=${actualSide}, Tamaño=${absSize}`);
+            
+            if (actualSide === positionSide && absSize > 0) {
+                console.log(`[getCurrentPositionSize] ¡Coincidencia encontrada! Devolviendo posición.`);
+                return { size: absSize, entryPrice: parseFloat(position.avgPrice) };
+            } else {
+                 console.log(`[getCurrentPositionSize] No hay coincidencia de lado (Esperado: ${positionSide}) o el tamaño es 0.`);
+            }
+        }
+    } else {
+        console.log(`[getCurrentPositionSize] Respuesta de API inválida o sin datos. Código: ${response?.code}, Mensaje: ${response?.msg}`);
+    }
+    return null;
 }
 
 async function cancelAllTPSLOrders(symbol) {
@@ -383,13 +357,16 @@ async function placeOrder(params) {
       break;
     }
   }
-  if (!confirmedPosition) throw new Error("Fallo crítico: No se pudo verificar la posición para establecer TP/SL.");
+  if (!confirmedPosition) {
+    throw new Error("Fallo crítico: No se pudo verificar la posición para establecer TP/SL.");
+  }
   
   const { size: posQty, entryPrice: avgEntryPrice } = confirmedPosition;
 
   if (trailingMode) {
     console.log("\n▶️ Iniciando Trailing Stop en segundo plano...");
     const trailingParams = { symbol, avgEntryPrice, posSide, positionSize: posQty, tickSize: contract.tickSize, trailingPercent, minDistancePercent };
+    // Ejecutar sin await para que no bloquee la respuesta
     if (trailingMode === 'dynamic') {
         dynamicTrailingStop(trailingParams);
     } else if (trailingMode === 'be') {
