@@ -2,7 +2,7 @@
 require('dotenv').config();
 const axios = require('axios');
 const crypto = require('crypto');
-const https = require('httpsa');
+const https = require('https');
 
 const API_KEY = process.env.BINGX_API_KEY;
 const API_SECRET = process.env.BINGX_API_SECRET;
