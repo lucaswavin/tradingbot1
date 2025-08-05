@@ -664,7 +664,7 @@ async function placeOrder(params) {
 
   // ========== PASO 6: CONFIGURAR TP/SL CON VALORES FINALES ==========
   const { size: totalPositionSize, entryPrice: avgEntryPrice, availableSize } = confirmedPosition;
-  const quantityForTPSL = Math.min(totalPositionSize, availableSize);
+  const quantityForTPSL = totalPositionSize;
 
   if (trailingMode) {
     console.log("\n▶️ Iniciando Trailing Stop en segundo plano...");
