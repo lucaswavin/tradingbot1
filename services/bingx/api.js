@@ -443,6 +443,44 @@ async function modifyPositionTPSL(params) {
   // No hay órdenes existentes O batch falló, crear órdenes nuevas
   console.log('\n🆕 === CREANDO ÓRDENES TP/SL COMPLETAMENTE NUEVAS ===');
   
+  // 🚨 CRÍTICO: Si llegamos aquí después de un batch fallido, 
+  // las órdenes viejas siguen existiendo. Hay que cancelarlas primero.
+  console.log('   - Verificando si necesitamos cancelar órdenes existentes...');
+  const stillExistingOrders = await getExistingTPSLOrders(symbol);
+  
+  if (stillExistingOrders.length > 0) {
+    console.log(`   - 🗑️ Encontradas ${stillExistingOrders.length} órdenes que cancelar manualmente`);
+    
+    // Cancelar una por una con delay de 1 segundo
+    for (let i = 0; i < stillExistingOrders.length; i++) {
+      const order = stillExistingOrders[i];
+      const orderIdString = typeof order.orderId === 'string' ? order.orderId : order.orderId.toString();
+      
+      console.log(`     - Cancelando [${i+1}/${stillExistingOrders.length}] ID: ${orderIdString}`);
+      
+      const cancelRes = await sendRequest('DELETE', '/openApi/swap/v2/trade/order', {
+        symbol: order.symbol,
+        orderId: orderIdString
+      });
+      
+      if (cancelRes.code === 0) {
+        console.log(`       ✅ Cancelada correctamente`);
+      } else {
+        console.log(`       ❌ Error: ${cancelRes.msg}`);
+      }
+      
+      // Esperar 1 segundo entre cancelaciones (según documentación BingX)
+      if (i < stillExistingOrders.length - 1) {
+        console.log(`       ⏳ Esperando 1 segundo...`);
+        await new Promise(r => setTimeout(r, 1000));
+      }
+    }
+    
+    // Esperar un poco más para que se procesen las cancelaciones
+    console.log('   - ⏳ Esperando 3 segundos para que se procesen las cancelaciones...');
+    await new Promise(r => setTimeout(r, 3000));
+  }
+  
   let tpSuccess = false, slSuccess = false;
   
   if (tpPercent && tpPercent > 0) {
