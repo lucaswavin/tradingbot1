@@ -1,4 +1,3 @@
-// --- DEPENDENCIAS Y CONFIGURACIÓN INICIAL ---
 require('dotenv').config();
 const axios = require('axios');
 const crypto = require('crypto');
@@ -24,8 +23,6 @@ const fastAxios = axios.create({
     'Connection': 'keep-alive',
   }
 });
-
-// ========== UTILS (LÓGICA OFICIAL DE BINGX) ==========
 
 function normalizeSymbol(symbol) {
   if (!symbol) return symbol;
@@ -79,7 +76,6 @@ function roundToTickSizeUltraPrecise(price, tickSize) {
     return parseFloat(rounded.toFixed(decimalPlaces));
 }
 
-// ========== FUNCIÓN DE COMUNICACIÓN OFICIAL ==========
 async function sendRequest(method, path, payload) {
     const timestamp = Date.now();
     const parametersToSign = getParameters(payload, timestamp, false);
@@ -93,7 +89,6 @@ async function sendRequest(method, path, payload) {
         headers: { 'X-BX-APIKEY': API_KEY }
     };
     
-    // <-- ¡¡¡LA CORRECCIÓN MÁS IMPORTANTE Y DEFINITIVA ESTÁ AQUÍ!!! -->
     if (method.toUpperCase() === 'POST' || method.toUpperCase() === 'DELETE') {
         config.data = '';
         config.headers['Content-Type'] = 'application/x-www-form-urlencoded';
@@ -107,8 +102,6 @@ async function sendRequest(method, path, payload) {
         return err.response?.data || { code: -1, msg: err.message };
     }
 }
-
-// ========== FUNCIONES DE LA API ==========
 
 async function setLeverage(symbol, leverage = 5, side = 'LONG') {
   leverage = Math.max(1, Math.min(125, Number(leverage)));
@@ -143,15 +136,12 @@ async function getContractInfo(symbol) {
   return { minOrderQty: 0.001, tickSize: 0.00001, stepSize: 0.001, minNotional: 1, maxLeverage: 20 };
 }
 
-// ========== LIMPIEZA Y VALIDACIÓN ==========
 function cleanWebhookData(rawData) { return { ...rawData }; }
 
 function validateWebhookData(data) {
     if (!data.symbol || !data.side) throw new Error(`Campos requeridos faltantes: symbol y side`);
     return data;
 }
-
-// ========== GESTIÓN DE POSICIONES ==========
 
 async function getPositionDetails(symbol, positionSide) {
   try {
@@ -221,7 +211,6 @@ async function cancelManualAllTPSLOrders(symbol) {
     console.log(`   - 3. Solicitudes de cancelación para ${tpslOrders.length} órdenes enviadas.`);
 }
 
-
 async function getUSDTBalance() {
   const res = await sendRequest('GET', '/openApi/swap/v2/user/balance', {});
   return res.code === 0 && res.data?.balance ? parseFloat(res.data.balance.balance) : 0;
@@ -253,8 +242,72 @@ function calculateTPSLPercentsFromOrders(orders, entryPrice) {
   return { tpPercent, slPercent };
 }
 
+async function modifyPositionTPSL(params) {
+  console.log('\n🔄 === INICIANDO MODIFICACIÓN DE TP/SL ===');
+  const { symbol: rawSymbol, side, tpPercent, slPercent } = params;
 
-// ========== FUNCIÓN PRINCIPAL OPTIMIZADA ==========
+  if (!tpPercent && !slPercent) {
+    throw new Error('No se proporcionaron nuevos porcentajes de TP o SL para modificar.');
+  }
+
+  const symbol = normalizeSymbol(rawSymbol);
+  const posSide = side.toUpperCase() === 'BUY' ? 'LONG' : 'SHORT';
+  
+  console.log(`   - Obteniendo detalles de la posición actual para ${symbol} (${posSide})...`);
+  const currentPosition = await getPositionDetails(symbol, posSide);
+  if (!currentPosition) {
+    throw new Error(`No se encontró una posición ${posSide} abierta para ${symbol}.`);
+  }
+  console.log(`   - Posición encontrada: Tamaño=${currentPosition.size}, Precio Entrada=${currentPosition.entryPrice}`);
+
+  const contract = await getContractInfo(symbol);
+
+  console.log('\n🗑️  CANCELANDO ÓRDENES TP/SL ANTIGUAS...');
+  await cancelManualAllTPSLOrders(symbol);
+  
+  await new Promise(r => setTimeout(r, 1500));
+
+  console.log('\n🎯 CONFIGURANDO NUEVAS ÓRDENES TP/SL...');
+  const sltpSide = posSide === 'LONG' ? 'SELL' : 'BUY';
+
+  const placeTPSL = async (isTP, percent) => {
+    if (!percent || percent <= 0) return { success: true, message: 'No proporcionado' };
+    
+    const price = currentPosition.entryPrice * (1 + (isTP ? 1 : -1) * (posSide === 'LONG' ? 1 : -1) * percent / 100);
+    const stopPrice = roundToTickSizeUltraPrecise(price, contract.tickSize);
+    
+    const payload = {
+      symbol, positionSide: posSide, side: sltpSide,
+      type: isTP ? 'TAKE_PROFIT_MARKET' : 'STOP_MARKET',
+      quantity: currentPosition.availableSize,
+      stopPrice, workingType: 'MARK_PRICE'
+    };
+
+    console.log(`   - Enviando ${isTP ? 'TP' : 'SL'} a ${stopPrice}...`);
+    const res = await sendRequest('POST', '/openApi/swap/v2/trade/order', payload);
+    if (res.code === 0) {
+        console.log(`   - ✅ ${isTP ? 'TP' : 'SL'} configurado.`);
+        return { success: true, order: res.data };
+    } else {
+        console.error(`   - ❌ Error configurando ${isTP ? 'TP' : 'SL'}: ${res.msg}`);
+        return { success: false, error: res.msg };
+    }
+  };
+
+  const tpResult = await placeTPSL(true, tpPercent);
+  const slResult = await placeTPSL(false, slPercent);
+
+  console.log('\n✅ === PROCESO DE MODIFICACIÓN FINALIZADO ===');
+  return { 
+    summary: { 
+        mainSuccess: true,
+        tpSuccess: tpResult.success, 
+        slSuccess: slResult.success 
+    },
+    error: tpResult.error || slResult.error || null
+  };
+}
+
 async function placeOrder(params) {
   console.log('\n🚀 === INICIANDO PROCESO DE ORDEN AVANZADO ===');
   const { symbol: rawSymbol, side, leverage = 5, usdtAmount = 10, type = 'MARKET', tpPercent: newTpPercent, slPercent: newSlPercent } = validateWebhookData(cleanWebhookData(params));
@@ -264,7 +317,6 @@ async function placeOrder(params) {
 
   const [contract, marketPrice] = await Promise.all([getContractInfo(symbol), getCurrentPrice(symbol)]);
   
-  // 1. VERIFICAR REENTRADA
   const existingPosition = await checkExistingPosition(symbol, posSide);
   let inheritedTpPercent = null, inheritedSlPercent = null;
   if (existingPosition.isReentry) {
@@ -276,7 +328,6 @@ async function placeOrder(params) {
     }
   }
 
-  // 2. EJECUTAR ORDEN PRINCIPAL
   await setLeverage(symbol, leverage, posSide);
   const orderValue = usdtAmount * leverage;
   if (orderValue < contract.minNotional) {
@@ -291,7 +342,6 @@ async function placeOrder(params) {
   if (orderResp.code !== 0) throw new Error(`Error en orden principal: ${orderResp.msg}`);
   console.log('✅ Orden principal ejecutada.');
 
-  // 3. CANCELACIÓN MANUAL Y ROBUSTA (SOLO EN REENTRADAS)
   if (existingPosition.isReentry) {
     console.log('\n🗑️ === PROCESO DE CANCELACIÓN MANUAL Y ROBUSTA ===');
     await cancelManualAllTPSLOrders(symbol);
@@ -314,7 +364,6 @@ async function placeOrder(params) {
     }
   }
 
-  // 4. OBTENER POSICIÓN CONSOLIDADA FINAL
   console.log('\n🔍 Obteniendo posición consolidada final...');
   let confirmedPosition;
   for (let i = 0; i < 10; i++) {
@@ -332,7 +381,6 @@ async function placeOrder(params) {
   }
   console.log(`✅ Posición final confirmada: Tamaño=${confirmedPosition.size}, Disponible=${confirmedPosition.availableSize}, Precio=${confirmedPosition.entryPrice}`);
 
-  // 5. DETERMINAR Y CONFIGURAR TP/SL FINAL
   const finalTpPercent = newTpPercent ?? inheritedTpPercent;
   const finalSlPercent = newSlPercent ?? inheritedSlPercent;
   if (!finalTpPercent && !finalSlPercent) {
@@ -378,9 +426,9 @@ async function placeOrder(params) {
   return { mainOrder: orderResp, finalPosition: confirmedPosition };
 }
 
-// ========== EXPORTACIONES COMPLETAS (PARA MÁXIMA FLEXIBILIDAD) ==========
 module.exports = {
   placeOrder,
+  modifyPositionTPSL,
   closeAllPositions,
   getUSDTBalance,
   getCurrentPrice,
@@ -389,7 +437,7 @@ module.exports = {
   checkExistingPosition,
   getExistingTPSLOrders,
   setLeverage,
-  cancelManualAllTPSLOrders, // Exportando el nombre correcto
+  cancelManualAllTPSLOrders,
   normalizeSymbol,
   cleanWebhookData,
   validateWebhookData,
