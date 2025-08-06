@@ -432,10 +432,27 @@ async function placeOrder(params) {
   let inheritedTpPercent = null, inheritedSlPercent = null;
   if (existingPosition.isReentry) {
     console.log(`\n🔄 === REENTRADA DETECTADA. Posición actual: ${existingPosition.size} @ ${existingPosition.entryPrice}`);
+    
+    // 🧠 LÓGICA INTELIGENTE: Heredar TP/SL si no se especifican nuevos
     const existingOrders = await getExistingTPSLOrders(symbol);
     if (existingOrders.length > 0) {
       const percents = calculateTPSLPercentsFromOrders(existingOrders, existingPosition.entryPrice);
-      inheritedTpPercent = percents.tpPercent; inheritedSlPercent = percents.slPercent;
+      inheritedTpPercent = percents.tpPercent; 
+      inheritedSlPercent = percents.slPercent;
+      
+      console.log(`   - 📊 TP/SL actuales detectados: TP=${inheritedTpPercent?.toFixed(2)}%, SL=${inheritedSlPercent?.toFixed(2)}%`);
+      
+      // 🎯 Decidir qué porcentajes usar (nuevos tienen prioridad)
+      const finalTpPercent = newTpPercent ?? inheritedTpPercent;
+      const finalSlPercent = newSlPercent ?? inheritedSlPercent;
+      
+      if (!newTpPercent && !newSlPercent) {
+        console.log(`   - 🧠 MODO HERENCIA: Usando porcentajes actuales para posición expandida`);
+      } else {
+        console.log(`   - 🔄 MODO CAMBIO: Aplicando nuevos porcentajes a posición expandida`);
+      }
+      
+      console.log(`   - ✅ Porcentajes finales: TP=${finalTpPercent?.toFixed(2)}%, SL=${finalSlPercent?.toFixed(2)}%`);
     }
   }
 
@@ -454,21 +471,45 @@ async function placeOrder(params) {
   console.log('✅ Orden principal ejecutada.');
 
   if (existingPosition.isReentry) {
-    console.log('\n🗑️ === PROCESO DE CANCELACIÓN MANUAL Y ROBUSTA ===');
-    // Usar cancelación optimizada
+    console.log('\n🗑️ === CANCELACIÓN INTELIGENTE DE TP/SL ANTIGUOS ===');
+    
+    // 🚀 OPTIMIZACIÓN: Cancelación paralela ultra rápida para reentradas
     const existingOrders = await getExistingTPSLOrders(symbol);
     if (existingOrders.length > 0) {
-      const cancelPromises = existingOrders.map(order => {
+      console.log(`   - 🔍 Encontradas ${existingOrders.length} órdenes TP/SL que actualizar`);
+      
+      const cancelPromises = existingOrders.map((order, i) => {
         const orderIdString = typeof order.orderId === 'string' ? order.orderId : order.orderId.toString();
+        console.log(`     - [${i+1}] Cancelando ID: ${orderIdString} en paralelo`);
+        
         return sendRequest('DELETE', '/openApi/swap/v2/trade/order', {
           symbol: order.symbol,
           orderId: orderIdString
-        });
+        }).then(res => ({
+          orderId: orderIdString,
+          success: res.code === 0,
+          error: res.msg
+        }));
       });
       
-      await Promise.all(cancelPromises);
-      console.log('   - ✅ Cancelaciones paralelas enviadas');
-      await new Promise(r => setTimeout(r, 2000));
+      console.log(`   - ⚡ Ejecutando cancelaciones paralelas...`);
+      const cancelResults = await Promise.all(cancelPromises);
+      
+      let canceledCount = 0;
+      cancelResults.forEach((result, i) => {
+        if (result.success) {
+          console.log(`     [${i+1}] ✅ Cancelada correctamente`);
+          canceledCount++;
+        } else {
+          console.log(`     [${i+1}] ❌ Error: ${result.error}`);
+        }
+      });
+      
+      console.log(`   - 📊 Resultado: ${canceledCount}/${existingOrders.length} canceladas exitosamente`);
+      console.log('   - ⚡ Esperando 1.5s optimizado para procesamiento...');
+      await new Promise(r => setTimeout(r, 1500));
+    } else {
+      console.log('   - ℹ️ No hay órdenes TP/SL que cancelar');
     }
   }
 
@@ -492,31 +533,70 @@ async function placeOrder(params) {
   const finalTpPercent = newTpPercent ?? inheritedTpPercent;
   const finalSlPercent = newSlPercent ?? inheritedSlPercent;
   if (!finalTpPercent && !finalSlPercent) {
-    console.log('\nℹ️ No se configuraron TP/SL (no especificados).');
+    console.log('\nℹ️ No se configuraron TP/SL (no especificados ni heredados).');
     return { mainOrder: orderResp, finalPosition: confirmedPosition };
   }
   
-  console.log(`\n🎯 === CONFIGURANDO NUEVAS ÓRDENES TP/SL ===`);
-  console.log(`   - Usando cantidad total de posición: ${confirmedPosition.size} | TP: ${finalTpPercent?.toFixed(2)}% | SL: ${finalSlPercent?.toFixed(2)}%`);
-
-  // 🚀 Creación paralela de TP/SL
+  console.log(`\n🎯 === CONFIGURANDO TP/SL INTELIGENTES ===`);
+  
+  // 🧠 Mostrar lógica aplicada
+  if (existingPosition.isReentry) {
+    if (!newTpPercent && !newSlPercent) {
+      console.log(`   - 🧠 MODO HERENCIA: Aplicando porcentajes existentes al 100% de la posición expandida`);
+    } else if (newTpPercent || newSlPercent) {
+      console.log(`   - 🔄 MODO ACTUALIZACIÓN: Aplicando nuevos porcentajes al 100% de la posición expandida`);
+    }
+  } else {
+    console.log(`   - 🆕 MODO NUEVA POSICIÓN: Aplicando porcentajes especificados`);
+  }
+  
+  console.log(`   - 📊 Cantidad total de posición: ${confirmedPosition.size}`);
+  console.log(`   - 🎯 TP: ${finalTpPercent?.toFixed(2)}% | SL: ${finalSlPercent?.toFixed(2)}%`);
+  
+  // 🚀 Creación paralela de TP/SL (ultra optimizada)
   const createPromises = [];
   
   if (finalTpPercent && finalTpPercent > 0) {
+    console.log(`   - 🎯 Preparando TP (${finalTpPercent}%) para toda la posición...`);
     createPromises.push(
       createSingleTPSLOrder(symbol, posSide, confirmedPosition, contract, true, finalTpPercent)
+        .then(result => ({ type: 'TP', success: result.success, error: result.error }))
     );
   }
   
   if (finalSlPercent && finalSlPercent > 0) {
+    console.log(`   - 🛡️ Preparando SL (${finalSlPercent}%) para toda la posición...`);
     createPromises.push(
       createSingleTPSLOrder(symbol, posSide, confirmedPosition, contract, false, finalSlPercent)
+        .then(result => ({ type: 'SL', success: result.success, error: result.error }))
     );
   }
   
   if (createPromises.length > 0) {
-    console.log('   - ⚡ Creando TP/SL en paralelo...');
-    await Promise.all(createPromises);
+    console.log(`   - ⚡ Ejecutando ${createPromises.length} creaciones TP/SL en paralelo...`);
+    const createResults = await Promise.all(createPromises);
+    
+    // Procesar resultados
+    let tpSuccess = false, slSuccess = false;
+    createResults.forEach(result => {
+      if (result.type === 'TP') {
+        tpSuccess = result.success;
+        if (result.success) {
+          console.log(`   - ✅ TP configurado exitosamente para toda la posición`);
+        } else {
+          console.log(`   - ❌ Error configurando TP: ${result.error}`);
+        }
+      } else if (result.type === 'SL') {
+        slSuccess = result.success;
+        if (result.success) {
+          console.log(`   - ✅ SL configurado exitosamente para toda la posición`);
+        } else {
+          console.log(`   - ❌ Error configurando SL: ${result.error}`);
+        }
+      }
+    });
+    
+    console.log('\n🎯 === TP/SL INTELIGENTES CONFIGURADOS ===');
   }
 
   console.log('\n✅ === PROCESO DE ORDEN FINALIZADO ===');
