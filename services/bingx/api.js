@@ -265,7 +265,7 @@ async function modifyPositionTPSL(params) {
   console.log('\n🗑️  CANCELANDO ÓRDENES TP/SL ANTIGUAS...');
   await cancelManualAllTPSLOrders(symbol);
   
-  await new Promise(r => setTimeout(r, 1500));
+  await new Promise(r => setTimeout(r, 60000));
 
   console.log('\n🎯 CONFIGURANDO NUEVAS ÓRDENES TP/SL...');
   const sltpSide = posSide === 'LONG' ? 'SELL' : 'BUY';
