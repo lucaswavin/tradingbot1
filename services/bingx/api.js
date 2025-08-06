@@ -93,6 +93,7 @@ async function sendRequest(method, path, payload) {
         headers: { 'X-BX-APIKEY': API_KEY }
     };
     
+    // <-- ¡¡¡LA CORRECCIÓN MÁS IMPORTANTE Y DEFINITIVA ESTÁ AQUÍ!!! -->
     if (method.toUpperCase() === 'POST' || method.toUpperCase() === 'DELETE') {
         config.data = '';
         config.headers['Content-Type'] = 'application/x-www-form-urlencoded';
@@ -191,10 +192,8 @@ async function checkExistingPosition(symbol, newSide) {
   return { exists: false, isReentry: false };
 }
 
-// ESTA FUNCIÓN AHORA SÍ ES FIABLE PORQUE USA EL MÉTODO MANUAL
-async function cancelAllTPSLOrders(symbol) {
+async function cancelManualAllTPSLOrders(symbol) {
     console.log(`   - 1. Obteniendo la lista de órdenes abiertas para ${symbol}...`);
-    // Usamos openOrders, ya que es el único que parece listarlas
     const listRes = await sendRequest('GET', '/openApi/swap/v2/trade/openOrders', { symbol });
 
     if (listRes.code !== 0 || !listRes.data?.orders) {
@@ -209,7 +208,7 @@ async function cancelAllTPSLOrders(symbol) {
         return;
     }
 
-    console.log(`   - 2. Se encontraron ${tpslOrders.length} órdenes TP/SL. Procediendo a cancelar...`);
+    console.log(`   - 2. Se encontraron ${tpslOrders.length} órdenes TP/SL. Procediendo a cancelar una por una...`);
     const cancelPromises = tpslOrders.map(order => {
         console.log(`      - Enviando cancelación para Order ID: ${order.orderId}`);
         return sendRequest('DELETE', '/openApi/swap/v2/trade/order', {
@@ -234,7 +233,6 @@ async function closeAllPositions(symbol) {
   return res;
 }
 
-// ESTA FUNCIÓN AHORA SE USARÁ SOLO PARA LA VERIFICACIÓN
 async function getExistingTPSLOrders(symbol) {
   const res = await sendRequest('GET', '/openApi/swap/v2/trade/openOrders', { symbol });
   if (res?.code === 0 && res.data?.orders) {
@@ -296,7 +294,7 @@ async function placeOrder(params) {
   // 3. CANCELACIÓN MANUAL Y ROBUSTA (SOLO EN REENTRADAS)
   if (existingPosition.isReentry) {
     console.log('\n🗑️ === PROCESO DE CANCELACIÓN MANUAL Y ROBUSTA ===');
-    await cancelAllTPSLOrders(symbol);
+    await cancelManualAllTPSLOrders(symbol);
 
     console.log('   - 4. Verificando que las órdenes se hayan cancelado...');
     for (let i = 0; i < 8; i++) {
@@ -320,7 +318,7 @@ async function placeOrder(params) {
   console.log('\n🔍 Obteniendo posición consolidada final...');
   let confirmedPosition;
   for (let i = 0; i < 10; i++) {
-    await new Promise(r => setTimeout(r, 1500)); // Pausa extra para la consolidación
+    await new Promise(r => setTimeout(r, 1500));
     const pos = await getPositionDetails(symbol, posSide);
     if (pos) {
         if (existingPosition.isReentry && pos.size > existingPosition.size && pos.size === pos.availableSize) {
@@ -367,7 +365,6 @@ async function placeOrder(params) {
         
         console.log(`   - Respuesta de ${isTP ? 'TP' : 'SL'}: ❌ Fallo: ${res.msg}`);
         if (!res.msg.includes("available amount")) {
-            // Si es un error diferente, no reintentar.
             break;
         }
         if (i < 4) await new Promise(r => setTimeout(r, 2000));
@@ -392,7 +389,7 @@ module.exports = {
   checkExistingPosition,
   getExistingTPSLOrders,
   setLeverage,
-  cancelAllTPSLOrders, // Exportando el nombre correcto
+  cancelManualAllTPSLOrders, // Exportando el nombre correcto
   normalizeSymbol,
   cleanWebhookData,
   validateWebhookData,
