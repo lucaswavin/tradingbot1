@@ -86,7 +86,12 @@ async function sendRequest(method, path, payload) {
     const config = {
         method: method,
         url: url,
-        headers: { 'X-BX-APIKEY': API_KEY }
+        headers: { 'X-BX-APIKEY': API_KEY },
+        // 🚀 CRÍTICO: Manejo correcto de BigInt para Order IDs
+        transformResponse: [(data) => {
+            // NO usar JSON.parse automático que corrompe los BigInt
+            return data; // Retornar string crudo
+        }]
     };
     
     if (method.toUpperCase() === 'POST' || method.toUpperCase() === 'DELETE') {
@@ -96,7 +101,30 @@ async function sendRequest(method, path, payload) {
 
     try {
         const response = await fastAxios(config);
-        return response.data;
+        
+        // 🔧 Parseo manual conservando BigInt como string
+        let responseData;
+        if (typeof response.data === 'string') {
+            // Reemplazar números grandes con strings para evitar corrupción
+            const safeJson = response.data.replace(
+                /"orderId":\s*(\d{16,})/g, 
+                '"orderId":"$1"'
+            ).replace(
+                /"cancelOrderId":\s*(\d{16,})/g,
+                '"cancelOrderId":"$1"'
+            );
+            
+            try {
+                responseData = JSON.parse(safeJson);
+            } catch (e) {
+                console.log('📄 Raw response data:', response.data);
+                responseData = JSON.parse(response.data);
+            }
+        } else {
+            responseData = response.data;
+        }
+        
+        return responseData;
     } catch (err) {
         console.error(`❌ Error en la petición a ${path}:`, err.response?.data || err.message);
         return err.response?.data || { code: -1, msg: err.message };
@@ -339,12 +367,20 @@ async function modifyPositionTPSL(params) {
           
           if (cancelOk && newOrderOk) {
             console.log(`     [${i+1}] ✅ Cancelado y reemplazado correctamente`);
+            console.log(`       🔄 Cancelado ID: ${result.cancelResponse?.orderId || result.cancelResponse?.cancelOrderId}`);
+            console.log(`       🆕 Nueva orden ID: ${result.newOrderResponse?.orderId}`);
             successCount++;
           } else if (cancelOk && !newOrderOk) {
             console.log(`     [${i+1}] ⚠️ Cancelado OK, pero fallo creando nueva: ${result.newOrderResponse?.msg || result.replaceMsg || 'Error desconocido'}`);
             errorCount++;
           } else {
             console.log(`     [${i+1}] ❌ Error completo: Cancel=${result.cancelResponse?.msg || result.cancelMsg || 'Error'}, New=${result.newOrderResponse?.msg || result.replaceMsg || 'Error'}`);
+            
+            // 🚨 DEBUG: Mostrar Order ID para verificar BigInt
+            if (result.cancelMsg === 'order not exist') {
+              console.log(`       🔍 DEBUG - Order ID enviado: ${batchOrders[i]?.cancelOrderId} (${typeof batchOrders[i]?.cancelOrderId})`);
+            }
+            
             errorCount++;
           }
         });
