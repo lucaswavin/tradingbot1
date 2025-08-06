@@ -198,17 +198,32 @@ async function cancelManualAllTPSLOrders(symbol) {
         return;
     }
 
-    console.log(`   - 2. Se encontraron ${tpslOrders.length} órdenes TP/SL. Procediendo a cancelar una por una...`);
-    const cancelPromises = tpslOrders.map(order => {
-        console.log(`      - Enviando cancelación para Order ID: ${order.orderId}`);
-        return sendRequest('DELETE', '/openApi/swap/v2/trade/order', {
+    console.log(`   - 2. Se encontraron ${tpslOrders.length} órdenes TP/SL. Cancelando una por una (respetando límite de 1 segundo)...`);
+    
+    // Cancelar UNA POR UNA con 1 segundo de espera entre cada una (según documentación)
+    for (let i = 0; i < tpslOrders.length; i++) {
+        const order = tpslOrders[i];
+        console.log(`      - [${i+1}/${tpslOrders.length}] Cancelando Order ID: ${order.orderId}...`);
+        
+        const cancelRes = await sendRequest('DELETE', '/openApi/swap/v2/trade/order', {
             symbol: order.symbol,
             orderId: order.orderId
         });
-    });
-
-    await Promise.all(cancelPromises);
-    console.log(`   - 3. Solicitudes de cancelación para ${tpslOrders.length} órdenes enviadas.`);
+        
+        if (cancelRes.code === 0) {
+            console.log(`        ✅ Orden ${order.orderId} cancelada exitosamente`);
+        } else {
+            console.log(`        ❌ Error cancelando ${order.orderId}: ${cancelRes.msg}`);
+        }
+        
+        // OBLIGATORIO: Esperar 1 segundo entre cancelaciones (según documentación BingX)
+        if (i < tpslOrders.length - 1) {
+            console.log(`        ⏳ Esperando 1 segundo antes de la siguiente cancelación...`);
+            await new Promise(r => setTimeout(r, 1000));
+        }
+    }
+    
+    console.log(`   - 3. ✅ Proceso de cancelación completado para ${tpslOrders.length} órdenes.`);
 }
 
 async function getUSDTBalance() {
@@ -243,7 +258,7 @@ function calculateTPSLPercentsFromOrders(orders, entryPrice) {
 }
 
 async function modifyPositionTPSL(params) {
-  console.log('\n🔄 === INICIANDO MODIFICACIÓN DE TP/SL ===');
+  console.log('\n🔄 === INICIANDO MODIFICACIÓN DE TP/SL CON BATCH CANCEL REPLACE ===');
   const { symbol: rawSymbol, side, tpPercent, slPercent } = params;
 
   if (!tpPercent && !slPercent) {
@@ -260,68 +275,107 @@ async function modifyPositionTPSL(params) {
   }
   console.log(`   - Posición encontrada: Tamaño Total=${currentPosition.size}, Disponible=${currentPosition.availableSize}, Precio Entrada=${currentPosition.entryPrice}`);
 
-  const contract = await getContractInfo(symbol);
-
-  console.log('\n🗑️  CANCELANDO ÓRDENES TP/SL ANTIGUAS...');
-  await cancelManualAllTPSLOrders(symbol);
-  
-  console.log('   - Verificando confirmación de cancelación de la API...');
-  for (let i = 0; i < 5; i++) {
-      await new Promise(r => setTimeout(r, 3000));
-      const remainingOrders = await getExistingTPSLOrders(symbol);
-      if (remainingOrders.length === 0) {
-          console.log('   - ✅ Verificación exitosa: Todas las órdenes TP/SL antiguas han sido eliminadas.');
-          break;
-      }
-      if (i === 4) { 
-          throw new Error(`No se pudo confirmar la cancelación de las órdenes antiguas. Inténtalo de nuevo.`);
-      }
-      console.log(`   - Esperando confirmación... Aún quedan ${remainingOrders.length} órdenes. Reintentando...`);
+  console.log('\n🔍 === OBTENIENDO ÓRDENES TP/SL EXISTENTES ===');
+  const existingOrders = await getExistingTPSLOrders(symbol);
+  if (existingOrders.length === 0) {
+    throw new Error(`No se encontraron órdenes TP/SL existentes para ${symbol}. No hay nada que modificar.`);
   }
+  console.log(`   - ✅ Se encontraron ${existingOrders.length} órdenes TP/SL para reemplazar`);
+  
+  // Mostrar detalles de órdenes existentes
+  existingOrders.forEach((order, i) => {
+    console.log(`     [${i+1}] ID: ${order.orderId}, Type: ${order.type}, Stop: ${order.stopPrice}`);
+  });
 
-  console.log('\n🎯 CONFIGURANDO NUEVAS ÓRDENES TP/SL...');
+  const contract = await getContractInfo(symbol);
   const sltpSide = posSide === 'LONG' ? 'SELL' : 'BUY';
 
-  const placeSingleTPSL = async (isTP, percent) => {
-    if (!percent || percent <= 0) return { success: true, message: 'No proporcionado' };
+  console.log('\n🚀 === CONSTRUYENDO BATCH CANCEL REPLACE ===');
+  
+  // Construir array de órdenes para batch replace
+  const batchOrders = [];
+  
+  existingOrders.forEach((existingOrder, index) => {
+    const isTP = existingOrder.type.includes('TAKE_PROFIT');
+    const percent = isTP ? tpPercent : slPercent;
     
-    const price = currentPosition.entryPrice * (1 + (isTP ? 1 : -1) * (posSide === 'LONG' ? 1 : -1) * percent / 100);
-    const stopPrice = roundToTickSizeUltraPrecise(price, contract.tickSize);
-    
-    const payload = {
-      symbol, 
-      positionSide: posSide, 
-      side: sltpSide,
-      type: isTP ? 'TAKE_PROFIT_MARKET' : 'STOP_MARKET',
-      quantity: currentPosition.size, // ✅ USA EL TAMAÑO TOTAL DE LA POSICIÓN
-      stopPrice, 
-      workingType: 'MARK_PRICE'
-    };
-
-    console.log(`   - Enviando ${isTP ? 'TP' : 'SL'} para el tamaño total (${payload.quantity}) a ${stopPrice}...`);
-    const res = await sendRequest('POST', '/openApi/swap/v2/trade/order', payload);
-    
-    if (res.code === 0) {
-        console.log(`   - ✅ ${isTP ? 'TP' : 'SL'} configurado exitosamente.`);
-        return { success: true, order: res.data };
+    if (percent && percent > 0) {
+      // Calcular nuevo precio
+      const newPrice = currentPosition.entryPrice * (1 + (isTP ? 1 : -1) * (posSide === 'LONG' ? 1 : -1) * percent / 100);
+      const newStopPrice = roundToTickSizeUltraPrecise(newPrice, contract.tickSize);
+      
+      const batchOrder = {
+        cancelOrderId: existingOrder.orderId,
+        cancelReplaceMode: "ALLOW_FAILURE",
+        symbol: symbol,
+        type: isTP ? "TAKE_PROFIT_MARKET" : "STOP_MARKET", 
+        side: sltpSide,
+        positionSide: posSide,
+        quantity: currentPosition.size,
+        stopPrice: newStopPrice,
+        workingType: "MARK_PRICE"
+      };
+      
+      batchOrders.push(batchOrder);
+      console.log(`   - ✅ [${index+1}] ${isTP ? 'TP' : 'SL'} preparado: ${existingOrder.stopPrice} → ${newStopPrice} (${percent}%)`);
     } else {
-        console.error(`   - ❌ Error configurando ${isTP ? 'TP' : 'SL'}: ${res.msg}`);
-        return { success: false, error: res.msg };
+      console.log(`   - ⏭️ [${index+1}] ${isTP ? 'TP' : 'SL'} omitido (sin porcentaje especificado)`);
     }
+  });
+
+  if (batchOrders.length === 0) {
+    throw new Error('No se generaron órdenes para el batch replace. Verifica los porcentajes proporcionados.');
+  }
+
+  console.log(`\n🎯 === EJECUTANDO BATCH CANCEL REPLACE (${batchOrders.length} órdenes) ===`);
+  
+  // Preparar payload para batch cancel replace
+  const payload = {
+    batchOrders: JSON.stringify(batchOrders)
   };
-
-  const tpResult = await placeSingleTPSL(true, tpPercent);
-  const slResult = await placeSingleTPSL(false, slPercent);
-
-  console.log('\n✅ === PROCESO DE MODIFICACIÓN FINALIZADO ===');
-  return { 
-    summary: { 
+  
+  console.log('   - Enviando batch cancel replace...');
+  const batchResult = await sendRequest('POST', '/openApi/swap/v1/trade/batchCancelReplace', payload);
+  
+  if (batchResult.code === 0) {
+    console.log('   - ✅ BATCH CANCEL REPLACE EXITOSO');
+    
+    // Procesar resultados
+    const results = batchResult.data || [];
+    let successCount = 0;
+    let errorCount = 0;
+    
+    results.forEach((result, i) => {
+      if (result.cancelResponse?.code === 0 && result.newOrderResponse?.code === 0) {
+        console.log(`     [${i+1}] ✅ Cancelado y reemplazado correctamente`);
+        successCount++;
+      } else {
+        console.log(`     [${i+1}] ❌ Error: Cancel=${result.cancelResponse?.msg || 'OK'}, New=${result.newOrderResponse?.msg || 'Error'}`);
+        errorCount++;
+      }
+    });
+    
+    console.log(`\n📊 === RESUMEN FINAL ===`);
+    console.log(`   - ✅ Exitosos: ${successCount}`);
+    console.log(`   - ❌ Errores: ${errorCount}`);
+    console.log(`   - 📋 Total procesados: ${results.length}`);
+    
+    return {
+      summary: {
         mainSuccess: true,
-        tpSuccess: tpResult.success, 
-        slSuccess: slResult.success 
-    },
-    error: tpResult.error || slResult.error || null
-  };
+        totalProcessed: results.length,
+        successCount: successCount,
+        errorCount: errorCount
+      },
+      batchResult: batchResult,
+      error: errorCount > 0 ? `${errorCount} órdenes fallaron` : null
+    };
+  } else {
+    console.log('   - ❌ ERROR EN BATCH CANCEL REPLACE');
+    console.error('   - Mensaje:', batchResult.msg || 'Error desconocido');
+    
+    throw new Error(`Batch Cancel Replace falló: ${batchResult.msg || 'Error desconocido'}`);
+  }
 }
 
 async function placeOrder(params) {
