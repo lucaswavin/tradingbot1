@@ -192,9 +192,15 @@ async function checkExistingPosition(symbol, newSide) {
 }
 
 async function cancelAllTPSLOrders(symbol) {
-  const payload = { symbol };
-  const res = await sendRequest('POST', '/openApi/swap/v2/trade/stopOrder/cancelAll', payload);
-  return res.code === 0 ? res.data.success?.length || 0 : 0;
+    const payload = { symbol };
+    const res = await sendRequest('POST', '/openApi/swap/v2/trade/stopOrder/cancelAll', payload);
+    if (res.code !== 0) {
+        console.log(`   - ⚠️ La API de BingX devolvió un error al intentar cancelar: ${res.msg}`);
+        return 0; // Indica que la solicitud falló
+    }
+    const count = res.data.success?.length || 0;
+    console.log(`   - Solicitud de cancelación enviada a BingX. La API reporta haber cancelado ${count} órdenes.`);
+    return count;
 }
 
 async function getUSDTBalance() {
@@ -260,19 +266,26 @@ async function placeOrder(params) {
   if (orderResp.code !== 0) throw new Error(`Error en orden principal: ${orderResp.msg}`);
   console.log('✅ Orden principal ejecutada.');
 
-  // 3. CANCELACIÓN ROBUSTA (SOLO EN REENTRADAS)
+  // 3. CANCELACIÓN ULTRA ROBUSTA (SOLO EN REENTRADAS)
   if (existingPosition.isReentry) {
     console.log('\n🗑️ === PROCESO DE CANCELACIÓN DE ÓRDENES ANTIGUAS ===');
     await cancelAllTPSLOrders(symbol);
-    for (let i = 0; i < 5; i++) {
-        await new Promise(r => setTimeout(r, 1000));
+
+    // Bucle de verificación, más paciente y con más intentos
+    for (let i = 0; i < 8; i++) { // 8 intentos con 1.5s de espera = 12 segundos de margen para la API
+        await new Promise(r => setTimeout(r, 1500));
+        
         const remainingOrders = await getExistingTPSLOrders(symbol);
         if (remainingOrders.length === 0) {
-            console.log('✅ Todas las órdenes TP/SL antiguas han sido canceladas.');
-            break;
+            console.log('✅ Verificado: Todas las órdenes TP/SL antiguas han sido eliminadas.');
+            break; // Salimos del bucle con éxito
         }
-        if (i === 4) throw new Error("No se pudo confirmar la cancelación de las órdenes antiguas.");
-        console.log(`   - Esperando confirmación de cancelación... (${remainingOrders.length} restantes)`);
+
+        if (i === 7) { // Si es el último intento y todavía hay órdenes
+            throw new Error(`No se pudo confirmar la cancelación de ${remainingOrders.length} órdenes antiguas después de varios intentos.`);
+        }
+        
+        console.log(`   - Verificando... Aún quedan ${remainingOrders.length} órdenes abiertas. Reintentando...`);
     }
   }
 
