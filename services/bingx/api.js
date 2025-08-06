@@ -258,7 +258,7 @@ function calculateTPSLPercentsFromOrders(orders, entryPrice) {
 }
 
 async function modifyPositionTPSL(params) {
-  console.log('\n🔄 === INICIANDO MODIFICACIÓN DE TP/SL CON BATCH CANCEL REPLACE ===');
+  console.log('\n🔄 === INICIANDO MODIFICACIÓN DE TP/SL ===');
   const { symbol: rawSymbol, side, tpPercent, slPercent } = params;
 
   if (!tpPercent && !slPercent) {
@@ -275,106 +275,189 @@ async function modifyPositionTPSL(params) {
   }
   console.log(`   - Posición encontrada: Tamaño Total=${currentPosition.size}, Disponible=${currentPosition.availableSize}, Precio Entrada=${currentPosition.entryPrice}`);
 
-  console.log('\n🔍 === OBTENIENDO ÓRDENES TP/SL EXISTENTES ===');
+  console.log('\n🔍 === VERIFICANDO ÓRDENES TP/SL EXISTENTES ===');
   const existingOrders = await getExistingTPSLOrders(symbol);
-  if (existingOrders.length === 0) {
-    throw new Error(`No se encontraron órdenes TP/SL existentes para ${symbol}. No hay nada que modificar.`);
-  }
-  console.log(`   - ✅ Se encontraron ${existingOrders.length} órdenes TP/SL para reemplazar`);
+  console.log(`   - Se encontraron ${existingOrders.length} órdenes TP/SL existentes`);
   
-  // Mostrar detalles de órdenes existentes
-  existingOrders.forEach((order, i) => {
-    console.log(`     [${i+1}] ID: ${order.orderId}, Type: ${order.type}, Stop: ${order.stopPrice}`);
-  });
-
   const contract = await getContractInfo(symbol);
   const sltpSide = posSide === 'LONG' ? 'SELL' : 'BUY';
 
-  console.log('\n🚀 === CONSTRUYENDO BATCH CANCEL REPLACE ===');
-  
-  // Construir array de órdenes para batch replace
-  const batchOrders = [];
-  
-  existingOrders.forEach((existingOrder, index) => {
-    const isTP = existingOrder.type.includes('TAKE_PROFIT');
-    const percent = isTP ? tpPercent : slPercent;
+  if (existingOrders.length > 0) {
+    console.log('\n🚀 === USANDO BATCH CANCEL REPLACE ===');
     
-    if (percent && percent > 0) {
-      // Calcular nuevo precio
-      const newPrice = currentPosition.entryPrice * (1 + (isTP ? 1 : -1) * (posSide === 'LONG' ? 1 : -1) * percent / 100);
-      const newStopPrice = roundToTickSizeUltraPrecise(newPrice, contract.tickSize);
-      
-      const batchOrder = {
-        cancelOrderId: existingOrder.orderId,
-        cancelReplaceMode: "ALLOW_FAILURE",
-        symbol: symbol,
-        type: isTP ? "TAKE_PROFIT_MARKET" : "STOP_MARKET", 
-        side: sltpSide,
-        positionSide: posSide,
-        quantity: currentPosition.size,
-        stopPrice: newStopPrice,
-        workingType: "MARK_PRICE"
-      };
-      
-      batchOrders.push(batchOrder);
-      console.log(`   - ✅ [${index+1}] ${isTP ? 'TP' : 'SL'} preparado: ${existingOrder.stopPrice} → ${newStopPrice} (${percent}%)`);
-    } else {
-      console.log(`   - ⏭️ [${index+1}] ${isTP ? 'TP' : 'SL'} omitido (sin porcentaje especificado)`);
-    }
-  });
+    // Mostrar detalles de órdenes existentes
+    existingOrders.forEach((order, i) => {
+      console.log(`     [${i+1}] ID: ${order.orderId}, Type: ${order.type}, Stop: ${order.stopPrice}`);
+    });
 
-  if (batchOrders.length === 0) {
-    throw new Error('No se generaron órdenes para el batch replace. Verifica los porcentajes proporcionados.');
-  }
-
-  console.log(`\n🎯 === EJECUTANDO BATCH CANCEL REPLACE (${batchOrders.length} órdenes) ===`);
-  
-  // Preparar payload para batch cancel replace
-  const payload = {
-    batchOrders: JSON.stringify(batchOrders)
-  };
-  
-  console.log('   - Enviando batch cancel replace...');
-  const batchResult = await sendRequest('POST', '/openApi/swap/v1/trade/batchCancelReplace', payload);
-  
-  if (batchResult.code === 0) {
-    console.log('   - ✅ BATCH CANCEL REPLACE EXITOSO');
+    // Construir array de órdenes para batch replace
+    const batchOrders = [];
     
-    // Procesar resultados
-    const results = batchResult.data || [];
-    let successCount = 0;
-    let errorCount = 0;
-    
-    results.forEach((result, i) => {
-      if (result.cancelResponse?.code === 0 && result.newOrderResponse?.code === 0) {
-        console.log(`     [${i+1}] ✅ Cancelado y reemplazado correctamente`);
-        successCount++;
-      } else {
-        console.log(`     [${i+1}] ❌ Error: Cancel=${result.cancelResponse?.msg || 'OK'}, New=${result.newOrderResponse?.msg || 'Error'}`);
-        errorCount++;
+    existingOrders.forEach((existingOrder, index) => {
+      const isTP = existingOrder.type.includes('TAKE_PROFIT');
+      const percent = isTP ? tpPercent : slPercent;
+      
+      if (percent && percent > 0) {
+        // Calcular nuevo precio
+        const newPrice = currentPosition.entryPrice * (1 + (isTP ? 1 : -1) * (posSide === 'LONG' ? 1 : -1) * percent / 100);
+        const newStopPrice = roundToTickSizeUltraPrecise(newPrice, contract.tickSize);
+        
+        const batchOrder = {
+          cancelOrderId: existingOrder.orderId,
+          cancelReplaceMode: "ALLOW_FAILURE",
+          symbol: symbol,
+          type: isTP ? "TAKE_PROFIT_MARKET" : "STOP_MARKET", 
+          side: sltpSide,
+          positionSide: posSide,
+          quantity: currentPosition.size,
+          stopPrice: newStopPrice,
+          workingType: "MARK_PRICE"
+        };
+        
+        batchOrders.push(batchOrder);
+        console.log(`   - ✅ [${index+1}] ${isTP ? 'TP' : 'SL'} preparado: ${existingOrder.stopPrice} → ${newStopPrice} (${percent}%)`);
       }
     });
-    
-    console.log(`\n📊 === RESUMEN FINAL ===`);
-    console.log(`   - ✅ Exitosos: ${successCount}`);
-    console.log(`   - ❌ Errores: ${errorCount}`);
-    console.log(`   - 📋 Total procesados: ${results.length}`);
-    
-    return {
-      summary: {
-        mainSuccess: true,
-        totalProcessed: results.length,
-        successCount: successCount,
-        errorCount: errorCount
-      },
-      batchResult: batchResult,
-      error: errorCount > 0 ? `${errorCount} órdenes fallaron` : null
-    };
+
+    if (batchOrders.length > 0) {
+      console.log(`\n🎯 === EJECUTANDO BATCH CANCEL REPLACE (${batchOrders.length} órdenes) ===`);
+      
+      const payload = { batchOrders: JSON.stringify(batchOrders) };
+      const batchResult = await sendRequest('POST', '/openApi/swap/v1/trade/batchCancelReplace', payload);
+      
+      if (batchResult.code === 0) {
+        console.log('   - ✅ BATCH CANCEL REPLACE EXITOSO');
+        
+        // Procesar resultados
+        const results = batchResult.data || [];
+        let successCount = 0;
+        let errorCount = 0;
+        
+        results.forEach((result, i) => {
+          const cancelOk = result.cancelResponse?.code === 0 || result.cancelResult === "true";
+          const newOrderOk = result.newOrderResponse?.code === 0 || result.replaceResult === "true";
+          
+          if (cancelOk && newOrderOk) {
+            console.log(`     [${i+1}] ✅ Cancelado y reemplazado correctamente`);
+            successCount++;
+          } else if (cancelOk && !newOrderOk) {
+            console.log(`     [${i+1}] ⚠️ Cancelado OK, pero fallo creando nueva: ${result.newOrderResponse?.msg || result.replaceMsg || 'Error desconocido'}`);
+            errorCount++;
+          } else {
+            console.log(`     [${i+1}] ❌ Error completo: Cancel=${result.cancelResponse?.msg || result.cancelMsg || 'Error'}, New=${result.newOrderResponse?.msg || result.replaceMsg || 'Error'}`);
+            errorCount++;
+          }
+        });
+        
+        console.log(`\n📊 === RESUMEN BATCH ===`);
+        console.log(`   - ✅ Exitosos: ${successCount}`);
+        console.log(`   - ❌ Errores: ${errorCount}`);
+        
+        // Si batch tuvo errores, intentar crear las órdenes que fallaron
+        if (errorCount > 0) {
+          console.log('\n⚠️ === ALGUNAS ÓRDENES FALLARON, CREANDO LAS FALTANTES ===');
+          
+          // Verificar qué órdenes TP/SL existen ahora  
+          await new Promise(r => setTimeout(r, 2000)); // Esperar que se procesen las nuevas órdenes
+          const currentOrders = await getExistingTPSLOrders(symbol);
+          
+          const hasTP = currentOrders.some(o => o.type.includes('TAKE_PROFIT'));
+          const hasSL = currentOrders.some(o => o.type.includes('STOP'));
+          
+          console.log(`   - Estado actual: TP=${hasTP ? '✅' : '❌'}, SL=${hasSL ? '✅' : '❌'}`);
+          
+          // Crear solo las órdenes que faltan
+          let tpCreated = hasTP, slCreated = hasSL;
+          
+          if (!hasTP && tpPercent && tpPercent > 0) {
+            console.log('   - Creando TP faltante...');
+            const tpResult = await createSingleTPSLOrder(symbol, posSide, currentPosition, contract, true, tpPercent);
+            tpCreated = tpResult.success;
+          }
+          
+          if (!hasSL && slPercent && slPercent > 0) {
+            console.log('   - Creando SL faltante...');
+            const slResult = await createSingleTPSLOrder(symbol, posSide, currentPosition, contract, false, slPercent);
+            slCreated = slResult.success;
+          }
+          
+          return {
+            summary: { 
+              mainSuccess: true, 
+              batchSuccessCount: successCount,
+              batchErrorCount: errorCount,
+              fallbackUsed: true,
+              finalTPStatus: tpCreated,
+              finalSLStatus: slCreated
+            },
+            batchResult: batchResult,
+            error: (!tpCreated || !slCreated) ? 'Algunas órdenes aún fallaron después del fallback' : null
+          };
+        }
+        
+        return {
+          summary: { mainSuccess: true, successCount, errorCount },
+          batchResult: batchResult,
+          error: errorCount > 0 ? `${errorCount} órdenes fallaron` : null
+        };
+      }
+    }
+  }
+  
+  // No hay órdenes existentes O batch falló, crear órdenes nuevas
+  console.log('\n🆕 === CREANDO ÓRDENES TP/SL COMPLETAMENTE NUEVAS ===');
+  
+  let tpSuccess = false, slSuccess = false;
+  
+  if (tpPercent && tpPercent > 0) {
+    const tpResult = await createSingleTPSLOrder(symbol, posSide, currentPosition, contract, true, tpPercent);
+    tpSuccess = tpResult.success;
+  }
+  
+  if (slPercent && slPercent > 0) {
+    const slResult = await createSingleTPSLOrder(symbol, posSide, currentPosition, contract, false, slPercent);
+    slSuccess = slResult.success;
+  }
+  
+  return {
+    summary: {
+      mainSuccess: tpSuccess || slSuccess,
+      finalTPStatus: tpSuccess,
+      finalSLStatus: slSuccess
+    },
+    error: (!tpSuccess && !slSuccess) ? 'No se pudieron crear las órdenes' : null
+  };
+}
+
+// Nueva función auxiliar para crear una sola orden TP o SL
+async function createSingleTPSLOrder(symbol, posSide, currentPosition, contract, isTP, percent) {
+  const sltpSide = posSide === 'LONG' ? 'SELL' : 'BUY';
+  const orderType = isTP ? 'TAKE_PROFIT_MARKET' : 'STOP_MARKET';
+  const label = isTP ? 'TP' : 'SL';
+  
+  // Calcular precio
+  const price = currentPosition.entryPrice * (1 + (isTP ? 1 : -1) * (posSide === 'LONG' ? 1 : -1) * percent / 100);
+  const stopPrice = roundToTickSizeUltraPrecise(price, contract.tickSize);
+  
+  const payload = {
+    symbol, 
+    positionSide: posSide, 
+    side: sltpSide,
+    type: orderType,
+    quantity: currentPosition.size,
+    stopPrice: stopPrice,
+    workingType: 'MARK_PRICE'
+  };
+
+  console.log(`     - Creando ${label} individual a ${stopPrice}...`);
+  const res = await sendRequest('POST', '/openApi/swap/v2/trade/order', payload);
+  
+  if (res.code === 0) {
+    console.log(`     - ✅ ${label} creado exitosamente`);
+    return { success: true, order: res.data };
   } else {
-    console.log('   - ❌ ERROR EN BATCH CANCEL REPLACE');
-    console.error('   - Mensaje:', batchResult.msg || 'Error desconocido');
-    
-    throw new Error(`Batch Cancel Replace falló: ${batchResult.msg || 'Error desconocido'}`);
+    console.log(`     - ❌ Error creando ${label}: ${res.msg}`);
+    return { success: false, error: res.msg };
   }
 }
 
