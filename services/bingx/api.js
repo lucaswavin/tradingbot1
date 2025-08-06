@@ -210,50 +210,6 @@ async function checkExistingPosition(symbol, newSide) {
   return { exists: false, isReentry: false };
 }
 
-async function cancelManualAllTPSLOrders(symbol) {
-    console.log(`   - 1. Obteniendo la lista de órdenes abiertas para ${symbol}...`);
-    const listRes = await sendRequest('GET', '/openApi/swap/v2/trade/openOrders', { symbol });
-
-    if (listRes.code !== 0 || !listRes.data?.orders) {
-        console.log('   - No se pudieron obtener las órdenes abiertas o no hay ninguna.');
-        return;
-    }
-
-    const tpslOrders = listRes.data.orders.filter(o => ['TAKE_PROFIT_MARKET', 'STOP_MARKET', 'TAKE_PROFIT', 'STOP'].includes(o.type));
-    
-    if (tpslOrders.length === 0) {
-        console.log('   - No se encontraron órdenes TP/SL para cancelar.');
-        return;
-    }
-
-    console.log(`   - 2. Se encontraron ${tpslOrders.length} órdenes TP/SL. Cancelando una por una (respetando límite de 1 segundo)...`);
-    
-    // Cancelar UNA POR UNA con 1 segundo de espera entre cada una (según documentación)
-    for (let i = 0; i < tpslOrders.length; i++) {
-        const order = tpslOrders[i];
-        console.log(`      - [${i+1}/${tpslOrders.length}] Cancelando Order ID: ${order.orderId}...`);
-        
-        const cancelRes = await sendRequest('DELETE', '/openApi/swap/v2/trade/order', {
-            symbol: order.symbol,
-            orderId: order.orderId
-        });
-        
-        if (cancelRes.code === 0) {
-            console.log(`        ✅ Orden ${order.orderId} cancelada exitosamente`);
-        } else {
-            console.log(`        ❌ Error cancelando ${order.orderId}: ${cancelRes.msg}`);
-        }
-        
-        // OBLIGATORIO: Esperar 1 segundo entre cancelaciones (según documentación BingX)
-        if (i < tpslOrders.length - 1) {
-            console.log(`        ⏳ Esperando 1 segundo antes de la siguiente cancelación...`);
-            await new Promise(r => setTimeout(r, 1000));
-        }
-    }
-    
-    console.log(`   - 3. ✅ Proceso de cancelación completado para ${tpslOrders.length} órdenes.`);
-}
-
 async function getUSDTBalance() {
   const res = await sendRequest('GET', '/openApi/swap/v2/user/balance', {});
   return res.code === 0 && res.data?.balance ? parseFloat(res.data.balance.balance) : 0;
@@ -285,8 +241,9 @@ function calculateTPSLPercentsFromOrders(orders, entryPrice) {
   return { tpPercent, slPercent };
 }
 
+// 🚀 FUNCIÓN ULTRA RÁPIDA OPTIMIZADA
 async function modifyPositionTPSL(params) {
-  console.log('\n🔄 === INICIANDO MODIFICACIÓN DE TP/SL ===');
+  console.log('\n🔄 === INICIANDO MODIFICACIÓN DE TP/SL ULTRA RÁPIDA ===');
   const { symbol: rawSymbol, side, tpPercent, slPercent } = params;
 
   if (!tpPercent && !slPercent) {
@@ -307,199 +264,126 @@ async function modifyPositionTPSL(params) {
   const existingOrders = await getExistingTPSLOrders(symbol);
   console.log(`   - Se encontraron ${existingOrders.length} órdenes TP/SL existentes`);
   
-  const contract = await getContractInfo(symbol);
-  const sltpSide = posSide === 'LONG' ? 'SELL' : 'BUY';
-
   if (existingOrders.length > 0) {
-    console.log('\n🚀 === USANDO BATCH CANCEL REPLACE ===');
-    
     // Mostrar detalles de órdenes existentes
     existingOrders.forEach((order, i) => {
       console.log(`     [${i+1}] ID: ${order.orderId}, Type: ${order.type}, Stop: ${order.stopPrice}`);
     });
-
-    // Construir array de órdenes para batch replace
-    const batchOrders = [];
-    
-    existingOrders.forEach((existingOrder, index) => {
-      const isTP = existingOrder.type.includes('TAKE_PROFIT');
-      const percent = isTP ? tpPercent : slPercent;
-      
-      if (percent && percent > 0) {
-        // Calcular nuevo precio
-        const newPrice = currentPosition.entryPrice * (1 + (isTP ? 1 : -1) * (posSide === 'LONG' ? 1 : -1) * percent / 100);
-        const newStopPrice = roundToTickSizeUltraPrecise(newPrice, contract.tickSize);
-        
-        const batchOrder = {
-          cancelOrderId: existingOrder.orderId,
-          cancelReplaceMode: "ALLOW_FAILURE",
-          symbol: symbol,
-          type: isTP ? "TAKE_PROFIT_MARKET" : "STOP_MARKET", 
-          side: sltpSide,
-          positionSide: posSide,
-          quantity: currentPosition.size,
-          stopPrice: newStopPrice,
-          workingType: "MARK_PRICE"
-        };
-        
-        batchOrders.push(batchOrder);
-        console.log(`   - ✅ [${index+1}] ${isTP ? 'TP' : 'SL'} preparado: ${existingOrder.stopPrice} → ${newStopPrice} (${percent}%)`);
-      }
-    });
-
-    if (batchOrders.length > 0) {
-      console.log(`\n🎯 === EJECUTANDO BATCH CANCEL REPLACE (${batchOrders.length} órdenes) ===`);
-      
-      const payload = { batchOrders: JSON.stringify(batchOrders) };
-      const batchResult = await sendRequest('POST', '/openApi/swap/v1/trade/batchCancelReplace', payload);
-      
-      if (batchResult.code === 0) {
-        console.log('   - ✅ BATCH CANCEL REPLACE EXITOSO');
-        
-        // Procesar resultados
-        const results = batchResult.data || [];
-        let successCount = 0;
-        let errorCount = 0;
-        
-        results.forEach((result, i) => {
-          const cancelOk = result.cancelResponse?.code === 0 || result.cancelResult === "true";
-          const newOrderOk = result.newOrderResponse?.code === 0 || result.replaceResult === "true";
-          
-          if (cancelOk && newOrderOk) {
-            console.log(`     [${i+1}] ✅ Cancelado y reemplazado correctamente`);
-            console.log(`       🔄 Cancelado ID: ${result.cancelResponse?.orderId || result.cancelResponse?.cancelOrderId}`);
-            console.log(`       🆕 Nueva orden ID: ${result.newOrderResponse?.orderId}`);
-            successCount++;
-          } else if (cancelOk && !newOrderOk) {
-            console.log(`     [${i+1}] ⚠️ Cancelado OK, pero fallo creando nueva: ${result.newOrderResponse?.msg || result.replaceMsg || 'Error desconocido'}`);
-            errorCount++;
-          } else {
-            console.log(`     [${i+1}] ❌ Error completo: Cancel=${result.cancelResponse?.msg || result.cancelMsg || 'Error'}, New=${result.newOrderResponse?.msg || result.replaceMsg || 'Error'}`);
-            
-            // 🚨 DEBUG: Mostrar Order ID para verificar BigInt
-            if (result.cancelMsg === 'order not exist') {
-              console.log(`       🔍 DEBUG - Order ID enviado: ${batchOrders[i]?.cancelOrderId} (${typeof batchOrders[i]?.cancelOrderId})`);
-            }
-            
-            errorCount++;
-          }
-        });
-        
-        console.log(`\n📊 === RESUMEN BATCH ===`);
-        console.log(`   - ✅ Exitosos: ${successCount}`);
-        console.log(`   - ❌ Errores: ${errorCount}`);
-        
-        // Si batch tuvo errores, intentar crear las órdenes que fallaron
-        if (errorCount > 0) {
-          console.log('\n⚠️ === ALGUNAS ÓRDENES FALLARON, CREANDO LAS FALTANTES ===');
-          
-          // Verificar qué órdenes TP/SL existen ahora  
-          await new Promise(r => setTimeout(r, 2000)); // Esperar que se procesen las nuevas órdenes
-          const currentOrders = await getExistingTPSLOrders(symbol);
-          
-          const hasTP = currentOrders.some(o => o.type.includes('TAKE_PROFIT'));
-          const hasSL = currentOrders.some(o => o.type.includes('STOP'));
-          
-          console.log(`   - Estado actual: TP=${hasTP ? '✅' : '❌'}, SL=${hasSL ? '✅' : '❌'}`);
-          
-          // Crear solo las órdenes que faltan
-          let tpCreated = hasTP, slCreated = hasSL;
-          
-          if (!hasTP && tpPercent && tpPercent > 0) {
-            console.log('   - Creando TP faltante...');
-            const tpResult = await createSingleTPSLOrder(symbol, posSide, currentPosition, contract, true, tpPercent);
-            tpCreated = tpResult.success;
-          }
-          
-          if (!hasSL && slPercent && slPercent > 0) {
-            console.log('   - Creando SL faltante...');
-            const slResult = await createSingleTPSLOrder(symbol, posSide, currentPosition, contract, false, slPercent);
-            slCreated = slResult.success;
-          }
-          
-          return {
-            summary: { 
-              mainSuccess: true, 
-              batchSuccessCount: successCount,
-              batchErrorCount: errorCount,
-              fallbackUsed: true,
-              finalTPStatus: tpCreated,
-              finalSLStatus: slCreated
-            },
-            batchResult: batchResult,
-            error: (!tpCreated || !slCreated) ? 'Algunas órdenes aún fallaron después del fallback' : null
-          };
-        }
-        
-        return {
-          summary: { mainSuccess: true, successCount, errorCount },
-          batchResult: batchResult,
-          error: errorCount > 0 ? `${errorCount} órdenes fallaron` : null
-        };
-      }
-    }
   }
+
+  const contract = await getContractInfo(symbol);
   
-  // No hay órdenes existentes O batch falló, crear órdenes nuevas
-  console.log('\n🆕 === CREANDO ÓRDENES TP/SL COMPLETAMENTE NUEVAS ===');
-  
-  // 🚨 CRÍTICO: Si llegamos aquí después de un batch fallido, 
-  // las órdenes viejas siguen existiendo. Hay que cancelarlas primero.
-  console.log('   - Verificando si necesitamos cancelar órdenes existentes...');
-  const stillExistingOrders = await getExistingTPSLOrders(symbol);
-  
-  if (stillExistingOrders.length > 0) {
-    console.log(`   - 🗑️ Encontradas ${stillExistingOrders.length} órdenes que cancelar manualmente`);
+  // 🚀 OPTIMIZACIÓN 1: SALTARSE EL BATCH - IR DIRECTO A CANCELACIÓN RÁPIDA
+  if (existingOrders.length > 0) {
+    console.log('\n⚡ === CANCELACIÓN PARALELA ULTRA RÁPIDA ===');
     
-    // Cancelar una por una con delay de 1 segundo
-    for (let i = 0; i < stillExistingOrders.length; i++) {
-      const order = stillExistingOrders[i];
+    // 🔥 OPTIMIZACIÓN 2: CANCELAR TODAS SIMULTÁNEAMENTE (SIN DELAYS)
+    const cancelPromises = existingOrders.map((order, i) => {
       const orderIdString = typeof order.orderId === 'string' ? order.orderId : order.orderId.toString();
+      console.log(`     - [${i+1}] Enviando cancelación paralela para ID: ${orderIdString}`);
       
-      console.log(`     - Cancelando [${i+1}/${stillExistingOrders.length}] ID: ${orderIdString}`);
-      
-      const cancelRes = await sendRequest('DELETE', '/openApi/swap/v2/trade/order', {
+      return sendRequest('DELETE', '/openApi/swap/v2/trade/order', {
         symbol: order.symbol,
         orderId: orderIdString
-      });
-      
-      if (cancelRes.code === 0) {
-        console.log(`       ✅ Cancelada correctamente`);
-      } else {
-        console.log(`       ❌ Error: ${cancelRes.msg}`);
-      }
-      
-      // Esperar 1 segundo entre cancelaciones (según documentación BingX)
-      if (i < stillExistingOrders.length - 1) {
-        console.log(`       ⏳ Esperando 1 segundo...`);
-        await new Promise(r => setTimeout(r, 1000));
-      }
-    }
+      }).then(res => ({
+        orderId: orderIdString,
+        success: res.code === 0,
+        error: res.msg
+      }));
+    });
     
-    // Esperar un poco más para que se procesen las cancelaciones
-    console.log('   - ⏳ Esperando 3 segundos para que se procesen las cancelaciones...');
-    await new Promise(r => setTimeout(r, 3000));
+    console.log(`   - 🚀 Ejecutando ${existingOrders.length} cancelaciones en paralelo...`);
+    const cancelResults = await Promise.all(cancelPromises);
+    
+    // Mostrar resultados de cancelación
+    let canceledCount = 0;
+    cancelResults.forEach((result, i) => {
+      if (result.success) {
+        console.log(`     [${i+1}] ✅ Cancelada: ${result.orderId}`);
+        canceledCount++;
+      } else {
+        console.log(`     [${i+1}] ❌ Error: ${result.error}`);
+      }
+    });
+    
+    console.log(`   - 📊 Canceladas: ${canceledCount}/${existingOrders.length}`);
+    
+    // 🔥 OPTIMIZACIÓN 3: TIMEOUT REDUCIDO (1.5s en lugar de 3s)
+    console.log('   - ⚡ Esperando 1.5 segundos optimizados para procesamiento...');
+    await new Promise(r => setTimeout(r, 1500));
   }
   
-  let tpSuccess = false, slSuccess = false;
+  // 🚀 OPTIMIZACIÓN 4: CREACIÓN PARALELA DE ÓRDENES TP/SL
+  console.log('\n⚡ === CREACIÓN PARALELA DE NUEVAS ÓRDENES TP/SL ===');
+  
+  const createPromises = [];
   
   if (tpPercent && tpPercent > 0) {
-    const tpResult = await createSingleTPSLOrder(symbol, posSide, currentPosition, contract, true, tpPercent);
-    tpSuccess = tpResult.success;
+    console.log(`   - 🎯 Preparando TP (${tpPercent}%) para creación paralela...`);
+    createPromises.push(
+      createSingleTPSLOrder(symbol, posSide, currentPosition, contract, true, tpPercent)
+        .then(result => ({ type: 'TP', success: result.success, error: result.error }))
+    );
   }
   
   if (slPercent && slPercent > 0) {
-    const slResult = await createSingleTPSLOrder(symbol, posSide, currentPosition, contract, false, slPercent);
-    slSuccess = slResult.success;
+    console.log(`   - 🛡️ Preparando SL (${slPercent}%) para creación paralela...`);
+    createPromises.push(
+      createSingleTPSLOrder(symbol, posSide, currentPosition, contract, false, slPercent)
+        .then(result => ({ type: 'SL', success: result.success, error: result.error }))
+    );
   }
   
+  if (createPromises.length > 0) {
+    console.log(`   - ⚡ Ejecutando ${createPromises.length} creaciones en paralelo...`);
+    const createResults = await Promise.all(createPromises);
+    
+    // Procesar resultados
+    let tpSuccess = false, slSuccess = false;
+    let errors = [];
+    
+    createResults.forEach(result => {
+      if (result.type === 'TP') {
+        tpSuccess = result.success;
+        if (result.success) {
+          console.log(`     - ✅ TP creado exitosamente en paralelo`);
+        } else {
+          console.log(`     - ❌ Error creando TP: ${result.error}`);
+          errors.push(result.error);
+        }
+      } else if (result.type === 'SL') {
+        slSuccess = result.success;
+        if (result.success) {
+          console.log(`     - ✅ SL creado exitosamente en paralelo`);
+        } else {
+          console.log(`     - ❌ Error creando SL: ${result.error}`);
+          errors.push(result.error);
+        }
+      }
+    });
+    
+    console.log('\n⚡ === PROCESO ULTRA RÁPIDO COMPLETADO ===');
+    return {
+      summary: {
+        mainSuccess: tpSuccess || slSuccess,
+        finalTPStatus: tpSuccess,
+        finalSLStatus: slSuccess,
+        optimized: true,
+        parallelProcessing: true
+      },
+      error: errors.length > 0 ? errors.join(', ') : null
+    };
+  }
+  
+  console.log('\n⚠️ === NO HAY ÓRDENES QUE CREAR ===');
   return {
     summary: {
-      mainSuccess: tpSuccess || slSuccess,
-      finalTPStatus: tpSuccess,
-      finalSLStatus: slSuccess
+      mainSuccess: false,
+      finalTPStatus: false,
+      finalSLStatus: false,
+      optimized: true
     },
-    error: (!tpSuccess && !slSuccess) ? 'No se pudieron crear las órdenes' : null
+    error: 'No se especificaron porcentajes válidos'
   };
 }
 
@@ -571,23 +455,20 @@ async function placeOrder(params) {
 
   if (existingPosition.isReentry) {
     console.log('\n🗑️ === PROCESO DE CANCELACIÓN MANUAL Y ROBUSTA ===');
-    await cancelManualAllTPSLOrders(symbol);
-
-    console.log('   - 4. Verificando que las órdenes se hayan cancelado...');
-    for (let i = 0; i < 8; i++) {
-        await new Promise(r => setTimeout(r, 1500));
-        
-        const remainingOrders = await getExistingTPSLOrders(symbol);
-        if (remainingOrders.length === 0) {
-            console.log('   - ✅ Verificado: Todas las órdenes TP/SL antiguas han sido eliminadas.');
-            break; 
-        }
-
-        if (i === 7) {
-            throw new Error(`No se pudo confirmar la cancelación de ${remainingOrders.length} órdenes antiguas después de varios intentos.`);
-        }
-        
-        console.log(`   - Verificando... Aún quedan ${remainingOrders.length} órdenes abiertas. Reintentando...`);
+    // Usar cancelación optimizada
+    const existingOrders = await getExistingTPSLOrders(symbol);
+    if (existingOrders.length > 0) {
+      const cancelPromises = existingOrders.map(order => {
+        const orderIdString = typeof order.orderId === 'string' ? order.orderId : order.orderId.toString();
+        return sendRequest('DELETE', '/openApi/swap/v2/trade/order', {
+          symbol: order.symbol,
+          orderId: orderIdString
+        });
+      });
+      
+      await Promise.all(cancelPromises);
+      console.log('   - ✅ Cancelaciones paralelas enviadas');
+      await new Promise(r => setTimeout(r, 2000));
     }
   }
 
@@ -618,36 +499,25 @@ async function placeOrder(params) {
   console.log(`\n🎯 === CONFIGURANDO NUEVAS ÓRDENES TP/SL ===`);
   console.log(`   - Usando cantidad total de posición: ${confirmedPosition.size} | TP: ${finalTpPercent?.toFixed(2)}% | SL: ${finalSlPercent?.toFixed(2)}%`);
 
-  const sltpSide = posSide === 'LONG' ? 'SELL' : 'BUY';
-  const placeTPSL = async (isTP, percent) => {
-    if (!percent || percent <= 0) return;
-    const price = confirmedPosition.entryPrice * (1 + (isTP ? 1 : -1) * (posSide === 'LONG' ? 1 : -1) * percent / 100);
-    const stopPrice = roundToTickSizeUltraPrecise(price, contract.tickSize);
-    const payload = { 
-      symbol, positionSide: posSide, side: sltpSide, 
-      type: isTP ? 'TAKE_PROFIT_MARKET' : 'STOP_MARKET', 
-      quantity: confirmedPosition.size, // ✅ USA EL TAMAÑO TOTAL DE LA POSICIÓN
-      stopPrice, workingType: 'MARK_PRICE' 
-    };
-    
-    for (let i = 0; i < 5; i++) {
-        console.log(`   - Enviando ${isTP ? 'TP' : 'SL'} a ${stopPrice} (Intento ${i + 1})...`);
-        const res = await sendRequest('POST', '/openApi/swap/v2/trade/order', payload);
-        if (res.code === 0) {
-            console.log(`   - Respuesta de ${isTP ? 'TP' : 'SL'}: ✅ Éxito`);
-            return;
-        }
-        
-        console.log(`   - Respuesta de ${isTP ? 'TP' : 'SL'}: ❌ Fallo: ${res.msg}`);
-        if (!res.msg.includes("available amount")) {
-            break;
-        }
-        if (i < 4) await new Promise(r => setTimeout(r, 2000));
-    }
-  };
-
-  await placeTPSL(true, finalTpPercent);
-  await placeTPSL(false, finalSlPercent);
+  // 🚀 Creación paralela de TP/SL
+  const createPromises = [];
+  
+  if (finalTpPercent && finalTpPercent > 0) {
+    createPromises.push(
+      createSingleTPSLOrder(symbol, posSide, confirmedPosition, contract, true, finalTpPercent)
+    );
+  }
+  
+  if (finalSlPercent && finalSlPercent > 0) {
+    createPromises.push(
+      createSingleTPSLOrder(symbol, posSide, confirmedPosition, contract, false, finalSlPercent)
+    );
+  }
+  
+  if (createPromises.length > 0) {
+    console.log('   - ⚡ Creando TP/SL en paralelo...');
+    await Promise.all(createPromises);
+  }
 
   console.log('\n✅ === PROCESO DE ORDEN FINALIZADO ===');
   return { mainOrder: orderResp, finalPosition: confirmedPosition };
@@ -664,7 +534,6 @@ module.exports = {
   checkExistingPosition,
   getExistingTPSLOrders,
   setLeverage,
-  cancelManualAllTPSLOrders,
   normalizeSymbol,
   cleanWebhookData,
   validateWebhookData,
