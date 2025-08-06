@@ -258,35 +258,51 @@ async function modifyPositionTPSL(params) {
   if (!currentPosition) {
     throw new Error(`No se encontró una posición ${posSide} abierta para ${symbol}.`);
   }
-  console.log(`   - Posición encontrada: Tamaño=${currentPosition.size}, Precio Entrada=${currentPosition.entryPrice}`);
+  console.log(`   - Posición encontrada: Tamaño Total=${currentPosition.size}, Disponible=${currentPosition.availableSize}, Precio Entrada=${currentPosition.entryPrice}`);
 
   const contract = await getContractInfo(symbol);
 
   console.log('\n🗑️  CANCELANDO ÓRDENES TP/SL ANTIGUAS...');
   await cancelManualAllTPSLOrders(symbol);
   
-  await new Promise(r => setTimeout(r, 60000));
+  console.log('   - Verificando confirmación de cancelación de la API...');
+  for (let i = 0; i < 5; i++) {
+      await new Promise(r => setTimeout(r, 3000));
+      const remainingOrders = await getExistingTPSLOrders(symbol);
+      if (remainingOrders.length === 0) {
+          console.log('   - ✅ Verificación exitosa: Todas las órdenes TP/SL antiguas han sido eliminadas.');
+          break;
+      }
+      if (i === 4) { 
+          throw new Error(`No se pudo confirmar la cancelación de las órdenes antiguas. Inténtalo de nuevo.`);
+      }
+      console.log(`   - Esperando confirmación... Aún quedan ${remainingOrders.length} órdenes. Reintentando...`);
+  }
 
   console.log('\n🎯 CONFIGURANDO NUEVAS ÓRDENES TP/SL...');
   const sltpSide = posSide === 'LONG' ? 'SELL' : 'BUY';
 
-  const placeTPSL = async (isTP, percent) => {
+  const placeSingleTPSL = async (isTP, percent) => {
     if (!percent || percent <= 0) return { success: true, message: 'No proporcionado' };
     
     const price = currentPosition.entryPrice * (1 + (isTP ? 1 : -1) * (posSide === 'LONG' ? 1 : -1) * percent / 100);
     const stopPrice = roundToTickSizeUltraPrecise(price, contract.tickSize);
     
     const payload = {
-      symbol, positionSide: posSide, side: sltpSide,
+      symbol, 
+      positionSide: posSide, 
+      side: sltpSide,
       type: isTP ? 'TAKE_PROFIT_MARKET' : 'STOP_MARKET',
-      quantity: currentPosition.availableSize,
-      stopPrice, workingType: 'MARK_PRICE'
+      quantity: currentPosition.size, // ✅ USA EL TAMAÑO TOTAL DE LA POSICIÓN
+      stopPrice, 
+      workingType: 'MARK_PRICE'
     };
 
-    console.log(`   - Enviando ${isTP ? 'TP' : 'SL'} a ${stopPrice}...`);
+    console.log(`   - Enviando ${isTP ? 'TP' : 'SL'} para el tamaño total (${payload.quantity}) a ${stopPrice}...`);
     const res = await sendRequest('POST', '/openApi/swap/v2/trade/order', payload);
+    
     if (res.code === 0) {
-        console.log(`   - ✅ ${isTP ? 'TP' : 'SL'} configurado.`);
+        console.log(`   - ✅ ${isTP ? 'TP' : 'SL'} configurado exitosamente.`);
         return { success: true, order: res.data };
     } else {
         console.error(`   - ❌ Error configurando ${isTP ? 'TP' : 'SL'}: ${res.msg}`);
@@ -294,8 +310,8 @@ async function modifyPositionTPSL(params) {
     }
   };
 
-  const tpResult = await placeTPSL(true, tpPercent);
-  const slResult = await placeTPSL(false, slPercent);
+  const tpResult = await placeSingleTPSL(true, tpPercent);
+  const slResult = await placeSingleTPSL(false, slPercent);
 
   console.log('\n✅ === PROCESO DE MODIFICACIÓN FINALIZADO ===');
   return { 
@@ -389,7 +405,7 @@ async function placeOrder(params) {
   }
   
   console.log(`\n🎯 === CONFIGURANDO NUEVAS ÓRDENES TP/SL ===`);
-  console.log(`   - Usando cantidad: ${confirmedPosition.availableSize} | TP: ${finalTpPercent?.toFixed(2)}% | SL: ${finalSlPercent?.toFixed(2)}%`);
+  console.log(`   - Usando cantidad total de posición: ${confirmedPosition.size} | TP: ${finalTpPercent?.toFixed(2)}% | SL: ${finalSlPercent?.toFixed(2)}%`);
 
   const sltpSide = posSide === 'LONG' ? 'SELL' : 'BUY';
   const placeTPSL = async (isTP, percent) => {
@@ -399,7 +415,7 @@ async function placeOrder(params) {
     const payload = { 
       symbol, positionSide: posSide, side: sltpSide, 
       type: isTP ? 'TAKE_PROFIT_MARKET' : 'STOP_MARKET', 
-      quantity: confirmedPosition.availableSize,
+      quantity: confirmedPosition.size, // ✅ USA EL TAMAÑO TOTAL DE LA POSICIÓN
       stopPrice, workingType: 'MARK_PRICE' 
     };
     
