@@ -193,7 +193,7 @@ async function checkExistingPosition(symbol, newSide) {
 
 async function cancelAllOrders(symbol) {
     const payload = { symbol };
-    //  <-- ¡¡¡ESTA ES LA LÍNEA CRÍTICA Y CORREGIDA!!! -->
+    //  <-- ¡¡¡LA CORRECCIÓN MÁS IMPORTANTE ESTÁ AQUÍ!!! -->
     const res = await sendRequest('POST', '/openApi/swap/v2/trade/cancelAllOrders', payload);
     if (res.code !== 0) {
         console.log(`   - ⚠️ La API de BingX devolvió un error al intentar cancelar: ${res.msg}`);
@@ -260,14 +260,8 @@ async function placeOrder(params) {
 
   // 2. EJECUTAR ORDEN PRINCIPAL
   await setLeverage(symbol, leverage, posSide);
-  const orderValue = usdtAmount * leverage;
-  if (orderValue < contract.minNotional) {
-      throw new Error(`El valor de la orden (${orderValue.toFixed(2)} USDT) es menor que el mínimo nocional requerido por el exchange (${contract.minNotional} USDT). Aumenta el usdtAmount o el leverage.`);
-  }
-  const quantityToOrder = roundToTickSizeUltraPrecise(orderValue / marketPrice, contract.stepSize);
-  if (quantityToOrder < contract.minOrderQty) {
-      throw new Error(`La cantidad a ordenar (${quantityToOrder}) es menor que la mínima requerida por el exchange (${contract.minOrderQty}). Aumenta el usdtAmount o el leverage.`);
-  }
+  const quantityToOrder = roundToTickSizeUltraPrecise((usdtAmount * leverage) / marketPrice, contract.stepSize);
+  if (quantityToOrder < contract.minOrderQty) throw new Error(`Cantidad (${quantityToOrder}) < mínima (${contract.minOrderQty})`);
   const mainPayload = { symbol, side: side.toUpperCase(), positionSide: posSide, type, quantity: quantityToOrder };
   const orderResp = await sendRequest('POST', '/openApi/swap/v2/trade/order', mainPayload);
   if (orderResp.code !== 0) throw new Error(`Error en orden principal: ${orderResp.msg}`);
@@ -276,7 +270,7 @@ async function placeOrder(params) {
   // 3. CANCELACIÓN ULTRA ROBUSTA (SOLO EN REENTRADAS)
   if (existingPosition.isReentry) {
     console.log('\n🗑️ === PROCESO DE CANCELACIÓN DE ÓRDENES ANTIGUAS ===');
-    await cancelAllOrders(symbol); // Llamando a la función corregida
+    await cancelAllOrders(symbol); // Usando la función corregida
 
     for (let i = 0; i < 8; i++) {
         await new Promise(r => setTimeout(r, 1500));
@@ -363,7 +357,7 @@ module.exports = {
 
   // Funciones de Acción
   setLeverage,
-  cancelAllOrders, // Se llama a la función correcta
+  cancelAllOrders, // Nombre de función corregido aquí también para claridad
   
   // Funciones de Utilidad
   normalizeSymbol,
