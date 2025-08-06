@@ -193,7 +193,6 @@ async function checkExistingPosition(symbol, newSide) {
 
 async function cancelAllOpenOrders(symbol) {
     const payload = { symbol };
-    //  <-- USANDO EL ENDPOINT OFICIAL Y CORRECTO QUE HAS ENCONTRADO -->
     const res = await sendRequest('DELETE', '/openApi/swap/v2/trade/allOpenOrders', payload);
     if (res.code !== 0) {
         console.log(`   - ⚠️ La API de BingX devolvió un error al intentar cancelar: ${res.msg}`);
@@ -216,7 +215,6 @@ async function closeAllPositions(symbol) {
 }
 
 async function getExistingTPSLOrders(symbol) {
-  // USANDO EL ENDPOINT DE VERIFICACIÓN CORRECTO
   const res = await sendRequest('GET', '/openApi/swap/v2/trade/stopOrder', { symbol });
   if (res?.code === 0 && res.data?.orders) {
     return res.data.orders;
@@ -322,6 +320,10 @@ async function placeOrder(params) {
     return { mainOrder: orderResp, finalPosition: confirmedPosition };
   }
   
+  // <-- ¡¡¡LA SOLUCIÓN ESTÁ AQUÍ!!! -->
+  console.log('⏳ Pausa de seguridad de 2 segundos para permitir la sincronización del motor de trading de BingX...');
+  await new Promise(r => setTimeout(r, 2000));
+  
   console.log(`\n🎯 === CONFIGURANDO NUEVAS ÓRDENES TP/SL ===`);
   console.log(`   - Usando cantidad: ${confirmedPosition.availableSize} | TP: ${finalTpPercent?.toFixed(2)}% | SL: ${finalSlPercent?.toFixed(2)}%`);
 
@@ -359,7 +361,7 @@ module.exports = {
   checkExistingPosition,
   getExistingTPSLOrders,
   setLeverage,
-  cancelAllOpenOrders, // Exportando el nombre correcto de la función
+  cancelAllOpenOrders,
   normalizeSymbol,
   cleanWebhookData,
   validateWebhookData,
