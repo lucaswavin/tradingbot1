@@ -191,17 +191,37 @@ async function checkExistingPosition(symbol, newSide) {
   return { exists: false, isReentry: false };
 }
 
-async function cancelAllOpenOrders(symbol) {
-    const payload = { symbol };
-    const res = await sendRequest('DELETE', '/openApi/swap/v2/trade/allOpenOrders', payload);
-    if (res.code !== 0) {
-        console.log(`   - ⚠️ La API de BingX devolvió un error al intentar cancelar: ${res.msg}`);
-        return 0;
+// ESTA FUNCIÓN AHORA SÍ ES FIABLE PORQUE USA EL MÉTODO MANUAL
+async function cancelAllTPSLOrders(symbol) {
+    console.log(`   - 1. Obteniendo la lista de órdenes abiertas para ${symbol}...`);
+    // Usamos openOrders, ya que es el único que parece listarlas
+    const listRes = await sendRequest('GET', '/openApi/swap/v2/trade/openOrders', { symbol });
+
+    if (listRes.code !== 0 || !listRes.data?.orders) {
+        console.log('   - No se pudieron obtener las órdenes abiertas o no hay ninguna.');
+        return;
     }
-    const count = (res.data?.success?.length || 0) + (res.data?.failed?.length || 0);
-    console.log(`   - Solicitud de cancelación enviada a BingX. La API reporta haber procesado ${count} órdenes.`);
-    return count;
+
+    const tpslOrders = listRes.data.orders.filter(o => ['TAKE_PROFIT_MARKET', 'STOP_MARKET', 'TAKE_PROFIT', 'STOP'].includes(o.type));
+    
+    if (tpslOrders.length === 0) {
+        console.log('   - No se encontraron órdenes TP/SL para cancelar.');
+        return;
+    }
+
+    console.log(`   - 2. Se encontraron ${tpslOrders.length} órdenes TP/SL. Procediendo a cancelar...`);
+    const cancelPromises = tpslOrders.map(order => {
+        console.log(`      - Enviando cancelación para Order ID: ${order.orderId}`);
+        return sendRequest('DELETE', '/openApi/swap/v2/trade/order', {
+            symbol: order.symbol,
+            orderId: order.orderId
+        });
+    });
+
+    await Promise.all(cancelPromises);
+    console.log(`   - 3. Solicitudes de cancelación para ${tpslOrders.length} órdenes enviadas.`);
 }
+
 
 async function getUSDTBalance() {
   const res = await sendRequest('GET', '/openApi/swap/v2/user/balance', {});
@@ -214,10 +234,11 @@ async function closeAllPositions(symbol) {
   return res;
 }
 
+// ESTA FUNCIÓN AHORA SE USARÁ SOLO PARA LA VERIFICACIÓN
 async function getExistingTPSLOrders(symbol) {
-  const res = await sendRequest('GET', '/openApi/swap/v2/trade/stopOrder', { symbol });
+  const res = await sendRequest('GET', '/openApi/swap/v2/trade/openOrders', { symbol });
   if (res?.code === 0 && res.data?.orders) {
-    return res.data.orders;
+    return res.data.orders.filter(o => ['TAKE_PROFIT_MARKET', 'STOP_MARKET', 'TAKE_PROFIT', 'STOP'].includes(o.type));
   }
   return [];
 }
@@ -261,28 +282,29 @@ async function placeOrder(params) {
   await setLeverage(symbol, leverage, posSide);
   const orderValue = usdtAmount * leverage;
   if (orderValue < contract.minNotional) {
-      throw new Error(`El valor de la orden (${orderValue.toFixed(2)} USDT) es menor que el mínimo nocional requerido por el exchange (${contract.minNotional} USDT). Aumenta el usdtAmount o el leverage.`);
+      throw new Error(`El valor de la orden (${orderValue.toFixed(2)} USDT) es menor que el mínimo nocional requerido por el exchange (${contract.minNotional} USDT).`);
   }
   const quantityToOrder = roundToTickSizeUltraPrecise(orderValue / marketPrice, contract.stepSize);
   if (quantityToOrder < contract.minOrderQty) {
-      throw new Error(`La cantidad a ordenar (${quantityToOrder}) es menor que la mínima requerida por el exchange (${contract.minOrderQty}). Aumenta el usdtAmount o el leverage.`);
+      throw new Error(`La cantidad a ordenar (${quantityToOrder}) es menor que la mínima requerida por el exchange (${contract.minOrderQty}).`);
   }
   const mainPayload = { symbol, side: side.toUpperCase(), positionSide: posSide, type, quantity: quantityToOrder };
   const orderResp = await sendRequest('POST', '/openApi/swap/v2/trade/order', mainPayload);
   if (orderResp.code !== 0) throw new Error(`Error en orden principal: ${orderResp.msg}`);
   console.log('✅ Orden principal ejecutada.');
 
-  // 3. CANCELACIÓN ULTRA ROBUSTA (SOLO EN REENTRADAS)
+  // 3. CANCELACIÓN MANUAL Y ROBUSTA (SOLO EN REENTRADAS)
   if (existingPosition.isReentry) {
-    console.log('\n🗑️ === PROCESO DE CANCELACIÓN DE ÓRDENES ANTIGUAS ===');
-    await cancelAllOpenOrders(symbol);
+    console.log('\n🗑️ === PROCESO DE CANCELACIÓN MANUAL Y ROBUSTA ===');
+    await cancelAllTPSLOrders(symbol);
 
+    console.log('   - 4. Verificando que las órdenes se hayan cancelado...');
     for (let i = 0; i < 8; i++) {
         await new Promise(r => setTimeout(r, 1500));
         
         const remainingOrders = await getExistingTPSLOrders(symbol);
         if (remainingOrders.length === 0) {
-            console.log('✅ Verificado: Todas las órdenes TP/SL antiguas han sido eliminadas.');
+            console.log('   - ✅ Verificado: Todas las órdenes TP/SL antiguas han sido eliminadas.');
             break; 
         }
 
@@ -298,7 +320,7 @@ async function placeOrder(params) {
   console.log('\n🔍 Obteniendo posición consolidada final...');
   let confirmedPosition;
   for (let i = 0; i < 10; i++) {
-    await new Promise(r => setTimeout(r, 1000));
+    await new Promise(r => setTimeout(r, 1500)); // Pausa extra para la consolidación
     const pos = await getPositionDetails(symbol, posSide);
     if (pos) {
         if (existingPosition.isReentry && pos.size > existingPosition.size && pos.size === pos.availableSize) {
@@ -320,10 +342,6 @@ async function placeOrder(params) {
     return { mainOrder: orderResp, finalPosition: confirmedPosition };
   }
   
-  // <-- ¡¡¡LA SOLUCIÓN ESTÁ AQUÍ!!! -->
-  console.log('⏳ Pausa de seguridad de 2 segundos para permitir la sincronización del motor de trading de BingX...');
-  await new Promise(r => setTimeout(r, 2000));
-  
   console.log(`\n🎯 === CONFIGURANDO NUEVAS ÓRDENES TP/SL ===`);
   console.log(`   - Usando cantidad: ${confirmedPosition.availableSize} | TP: ${finalTpPercent?.toFixed(2)}% | SL: ${finalSlPercent?.toFixed(2)}%`);
 
@@ -338,9 +356,22 @@ async function placeOrder(params) {
       quantity: confirmedPosition.availableSize,
       stopPrice, workingType: 'MARK_PRICE' 
     };
-    console.log(`   - Enviando ${isTP ? 'TP' : 'SL'} a ${stopPrice}...`);
-    const res = await sendRequest('POST', '/openApi/swap/v2/trade/order', payload);
-    console.log(`   - Respuesta de ${isTP ? 'TP' : 'SL'}: ${res.code === 0 ? '✅ Éxito' : `❌ Fallo: ${res.msg}`}`);
+    
+    for (let i = 0; i < 5; i++) {
+        console.log(`   - Enviando ${isTP ? 'TP' : 'SL'} a ${stopPrice} (Intento ${i + 1})...`);
+        const res = await sendRequest('POST', '/openApi/swap/v2/trade/order', payload);
+        if (res.code === 0) {
+            console.log(`   - Respuesta de ${isTP ? 'TP' : 'SL'}: ✅ Éxito`);
+            return;
+        }
+        
+        console.log(`   - Respuesta de ${isTP ? 'TP' : 'SL'}: ❌ Fallo: ${res.msg}`);
+        if (!res.msg.includes("available amount")) {
+            // Si es un error diferente, no reintentar.
+            break;
+        }
+        if (i < 4) await new Promise(r => setTimeout(r, 2000));
+    }
   };
 
   await placeTPSL(true, finalTpPercent);
@@ -361,7 +392,7 @@ module.exports = {
   checkExistingPosition,
   getExistingTPSLOrders,
   setLeverage,
-  cancelAllOpenOrders,
+  cancelAllTPSLOrders, // Exportando el nombre correcto
   normalizeSymbol,
   cleanWebhookData,
   validateWebhookData,
