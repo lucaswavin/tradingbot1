@@ -4,10 +4,9 @@ const {
   getUSDTBalance,
   closeAllPositions,
   getCurrentPrice,
-  modifyPositionTPSL // <-- (1) IMPORTACIÓN AÑADIDA
+  modifyPositionTPSL
 } = require('../services/bingx/api');
 
-// ======== DASHBOARD SIGNAL HANDLER =========
 exports.handleWebhook = async (req, res) => {
   const startTime = Date.now();
   try {
@@ -42,7 +41,6 @@ async function processSignalForDashboard(data, startTime) {
   }
 }
 
-// ======== WEBHOOK DE TRADING ULTRA FLEXIBLE =========
 exports.handleTradingViewWebhook = async (req, res) => {
   const startTime = Date.now();
   try {
@@ -66,7 +64,6 @@ exports.handleTradingViewWebhook = async (req, res) => {
   }
 };
 
-// ========== NÚCLEO LÓGICO: PROCESA Y ENVÍA ORDEN ==========
 async function processTradingSignalOptimized(body, startTime) {
   console.log('\n🔧 === PROCESANDO SEÑAL DE TRADING ===');
   
@@ -95,7 +92,6 @@ async function processTradingSignalOptimized(body, startTime) {
       return;
     }
 
-    // DETERMINAR ACCIÓN: BUY/SELL/CLOSE/MODIFY
     let actionToTake = 'unknown';
     let orderSide = '';
     
@@ -109,7 +105,7 @@ async function processTradingSignalOptimized(body, startTime) {
       } else if (actionLower.includes('short') || actionLower.includes('sell')) {
         actionToTake = 'open_short';
         orderSide = 'SELL';
-      } else if (actionLower.includes('modify_tpsl')) { // <-- (2) LÓGICA DE ACCIÓN AÑADIDA
+      } else if (actionLower.includes('modify_tpsl')) {
         actionToTake = 'modify_tpsl';
       }
     }
@@ -128,27 +124,23 @@ async function processTradingSignalOptimized(body, startTime) {
     
     console.log(`✅ Acción determinada: ${actionToTake}`);
 
-    // ========== EXECUTE ACTION ==========
-    console.log('\n--- EJECUTANDO ACCIÓN ---');
     let response;
     
     try {
       if (actionToTake === 'close') {
         console.log('🔒 CERRANDO POSICIÓN');
         response = await closeAllPositions(symbol);
-
-      } else if (actionToTake === 'modify_tpsl') { // <-- (3) BLOQUE DE EJECUCIÓN AÑADIDO
+      } else if (actionToTake === 'modify_tpsl') {
         console.log('🔄 MODIFICANDO TP/SL DE POSICIÓN EXISTENTE');
         const newTpPercent = tpPercent || tp_percent;
         const newSlPercent = slPercent || sl_percent;
         
         response = await modifyPositionTPSL({
             symbol,
-            side, // El 'side' original (BUY/SELL) nos dice si es LONG o SHORT
+            side,
             tpPercent: newTpPercent ? Number(newTpPercent) : null,
             slPercent: newSlPercent ? Number(newSlPercent) : null,
         });
-
       } else if (actionToTake === 'open_long' || actionToTake === 'open_short') {
         let balance = 0;
         console.log('\n--- VERIFICANDO BALANCE ---');
@@ -169,15 +161,29 @@ async function processTradingSignalOptimized(body, startTime) {
           usdtAmount: Number(usdtAmount) || 1, type: (type || 'MARKET').toUpperCase()
         };
         
-        if (tp_percent) orderParams.tpPercent = Number(tp_percent); else if (tpPercent) orderParams.tpPercent = Number(tpPercent);
-        if (sl_percent) orderParams.slPercent = Number(sl_percent); else if (slPercent) orderParams.slPercent = Number(slPercent);
-        // ... (resto de tus parámetros) ...
+        if (qty) orderParams.quantity = Number(qty);
+        if (quantity) orderParams.quantity = Number(quantity);
+        if (limitPrice) orderParams.limitPrice = Number(limitPrice);
+        if (limit_price) orderParams.limitPrice = Number(limit_price);
+        if (tp_percent) orderParams.tpPercent = Number(tp_percent);
+        else if (tpPercent) orderParams.tpPercent = Number(tpPercent);
+        if (sl_percent) orderParams.slPercent = Number(sl_percent);
+        else if (slPercent) orderParams.slPercent = Number(slPercent);
+        if (tp_price) orderParams.tpPrice = Number(tp_price);
+        else if (tpPrice) orderParams.tpPrice = Number(tpPrice);
+        else if (take_profit) orderParams.tpPrice = Number(take_profit);
+        else if (takeProfit) orderParams.tpPrice = Number(takeProfit);
+        if (sl_price) orderParams.slPrice = Number(sl_price);
+        else if (slPrice) orderParams.slPrice = Number(slPrice);
+        else if (stop_loss) orderParams.slPrice = Number(stop_loss);
+        else if (stopLoss) orderParams.slPrice = Number(stopLoss);
+        
+        Object.assign(orderParams, rest);
         
         console.log('📋 Parámetros finales de la orden:', JSON.stringify(orderParams, null, 2));
 
         console.log('\n🚀 Enviando orden a BingX...');
         response = await placeOrder(orderParams);
-
       } else {
         console.log('❓ ACCIÓN NO RECONOCIDA');
         await saveSignalRecord(body, actionToTake, orderSide, null, 0, false, 'Acción no reconocida', startTime);
@@ -214,7 +220,6 @@ async function processTradingSignalOptimized(body, startTime) {
   }
 }
 
-// ====== GUARDADO DE RESULTADOS (SIN CAMBIOS) =======
 async function saveSignalRecord(requestBody, actionTaken, orderSide, response, balance, orderSuccess, errorMessage, startTime) {
     try {
       if (!global.botState) global.botState = { signals: [] };
@@ -242,6 +247,7 @@ async function saveSignalRecord(requestBody, actionTaken, orderSide, response, b
       console.error('❌ Error guardando señal:', error);
     }
 }
+
 async function saveErrorRecord(requestBody, errorMessage, startTime) {
     try {
       if (!global.botState) global.botState = { signals: [] };
@@ -266,14 +272,92 @@ async function saveErrorRecord(requestBody, errorMessage, startTime) {
     }
 }
 
-// ======= UTILIDADES STATUS/METRICS (SIN CAMBIOS) =======
-// (Aquí va todo tu código de testConnection, getStatus y getMetrics, que no necesita cambios)
 exports.testConnection = async (req, res) => {
-    // Tu código original
+  console.log('\n🔧 ===== TEST DE CONEXIÓN =====');
+  try {
+    console.log('📊 Testeando conexión con BingX...');
+    const balance = await getUSDTBalance();
+    console.log('✅ CONEXIÓN EXITOSA');
+    console.log(`💰 Balance actual: ${balance} USDT`);
+    console.log('==============================\n');
+    res.json({
+      ok: true,
+      msg: 'Conexión con BingX exitosa',
+      balance: balance,
+      timestamp: new Date().toISOString(),
+      apiConfigured: !!(process.env.BINGX_API_KEY && process.env.BINGX_API_SECRET)
+    });
+  } catch (error) {
+    console.log('❌ ERROR DE CONEXIÓN');
+    console.error('💥 Error:', error.message);
+    console.log('==============================\n');
+    res.status(500).json({
+      ok: false,
+      msg: 'Error conectando con BingX',
+      error: error.message,
+      timestamp: new Date().toISOString(),
+      apiConfigured: !!(process.env.BINGX_API_KEY && process.env.BINGX_API_SECRET)
+    });
+  }
 };
+
 exports.getStatus = (req, res) => {
-    // Tu código original
+  const signals = global.botState?.signals || [];
+  const lastSignals = signals.slice(-10);
+  const stats = {
+    totalSignals: signals.length,
+    successfulTrades: signals.filter(s => s.orderSuccess === true).length,
+    failedTrades: signals.filter(s => s.tradingExecuted === true && s.orderSuccess !== true).length,
+    errorsCount: signals.filter(s => s.error).length,
+    closeActions: signals.filter(s => s.actionTaken === 'close').length,
+    openActions: signals.filter(s => s.actionTaken && s.actionTaken.includes('open')).length,
+    lastSignalTime: signals.length > 0 ? signals[signals.length - 1].timestamp : 'Nunca',
+    apiConfigured: !!(process.env.BINGX_API_KEY && process.env.BINGX_API_SECRET),
+    webhookSecretConfigured: !!process.env.WEBHOOK_SECRET,
+    averageProcessingTime: signals.length > 0
+      ? (signals.reduce((sum, s) => sum + (s.processingTime || 0), 0) / signals.length).toFixed(1) + 'ms'
+      : '0ms'
+  };
+  res.json({
+    ok: true,
+    stats: stats,
+    lastSignals: lastSignals,
+    timestamp: new Date().toISOString()
+  });
 };
+
 exports.getMetrics = (req, res) => {
-    // Tu código original
+  const signals = global.botState?.signals || [];
+  const lastSignals = signals.slice(-10);
+  const successfulTrades = signals.filter(s => s.orderSuccess === true).length;
+  const failedTrades = signals.filter(s => s.tradingExecuted === true && s.orderSuccess !== true).length;
+  const totalTrades = signals.filter(s => s.tradingExecuted === true).length;
+  const processingTimes = signals.filter(s => s.processingTime).map(s => s.processingTime);
+  const avgProcessingTime = processingTimes.length > 0
+    ? (processingTimes.reduce((sum, time) => sum + time, 0) / processingTimes.length).toFixed(1)
+    : 0;
+  const metrics = {
+    totalSignals: signals.length,
+    totalTrades: totalTrades,
+    successfulTrades: successfulTrades,
+    failedTrades: failedTrades,
+    successRate: totalTrades > 0 ? ((successfulTrades / totalTrades) * 100).toFixed(1) : 0,
+    averageProcessingTime: `${avgProcessingTime}ms`,
+    maxProcessingTime: processingTimes.length > 0 ? `${Math.max(...processingTimes)}ms` : '0ms',
+    minProcessingTime: processingTimes.length > 0 ? `${Math.min(...processingTimes)}ms` : '0ms',
+    lastSignalTime: signals.length > 0 ? signals[signals.length - 1].timestamp : 'Nunca',
+    serverUptime: `${Math.floor(process.uptime() / 60)} minutos`,
+    memoryUsage: {
+      used: `${Math.round(process.memoryUsage().heapUsed / 1024 / 1024)} MB`,
+      total: `${Math.round(process.memoryUsage().heapTotal / 1024 / 1024)} MB`
+    },
+    apiConfigured: !!(process.env.BINGX_API_KEY && process.env.BINGX_API_SECRET),
+    webhookSecretConfigured: !!process.env.WEBHOOK_SECRET
+  };
+  res.json({
+    ok: true,
+    metrics: metrics,
+    recentSignals: lastSignals,
+    timestamp: new Date().toISOString()
+  });
 };
