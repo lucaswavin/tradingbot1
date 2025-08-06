@@ -191,15 +191,16 @@ async function checkExistingPosition(symbol, newSide) {
   return { exists: false, isReentry: false };
 }
 
-async function cancelAllTPSLOrders(symbol) {
+async function cancelAllOrders(symbol) {
     const payload = { symbol };
-    const res = await sendRequest('POST', '/openApi/swap/v2/trade/stopOrder/cancelAll', payload);
+    //  <-- ¡¡¡LA CORRECCIÓN MÁS IMPORTANTE ESTÁ AQUÍ!!! -->
+    const res = await sendRequest('POST', '/openApi/swap/v2/trade/cancelAllOrders', payload);
     if (res.code !== 0) {
         console.log(`   - ⚠️ La API de BingX devolvió un error al intentar cancelar: ${res.msg}`);
-        return 0; // Indica que la solicitud falló
+        return 0;
     }
-    const count = res.data.success?.length || 0;
-    console.log(`   - Solicitud de cancelación enviada a BingX. La API reporta haber cancelado ${count} órdenes.`);
+    const count = (res.data?.success?.length || 0) + (res.data?.failed?.length || 0);
+    console.log(`   - Solicitud de cancelación enviada a BingX. La API reporta haber procesado ${count} órdenes.`);
     return count;
 }
 
@@ -269,19 +270,18 @@ async function placeOrder(params) {
   // 3. CANCELACIÓN ULTRA ROBUSTA (SOLO EN REENTRADAS)
   if (existingPosition.isReentry) {
     console.log('\n🗑️ === PROCESO DE CANCELACIÓN DE ÓRDENES ANTIGUAS ===');
-    await cancelAllTPSLOrders(symbol);
+    await cancelAllOrders(symbol); // Usando la función corregida
 
-    // Bucle de verificación, más paciente y con más intentos
-    for (let i = 0; i < 8; i++) { // 8 intentos con 1.5s de espera = 12 segundos de margen para la API
+    for (let i = 0; i < 8; i++) {
         await new Promise(r => setTimeout(r, 1500));
         
         const remainingOrders = await getExistingTPSLOrders(symbol);
         if (remainingOrders.length === 0) {
             console.log('✅ Verificado: Todas las órdenes TP/SL antiguas han sido eliminadas.');
-            break; // Salimos del bucle con éxito
+            break; 
         }
 
-        if (i === 7) { // Si es el último intento y todavía hay órdenes
+        if (i === 7) {
             throw new Error(`No se pudo confirmar la cancelación de ${remainingOrders.length} órdenes antiguas después de varios intentos.`);
         }
         
@@ -357,7 +357,7 @@ module.exports = {
 
   // Funciones de Acción
   setLeverage,
-  cancelAllTPSLOrders,
+  cancelAllOrders, // Nombre de función corregido aquí también para claridad
   
   // Funciones de Utilidad
   normalizeSymbol,
