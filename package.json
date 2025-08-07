@@ -8,11 +8,28 @@
   "scripts": {
     "start": "NODE_ENV=production node --max-old-space-size=512 --optimize-for-size src/server.js",
     "dev": "NODE_ENV=development node src/server.js",
-    "test": "node -e \"console.log('✅ Test básico OK')\""
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:coverage": "vitest run --coverage",
+    "test:ui": "vitest --ui"
   },
   "dependencies": {
     "axios": "^1.7.2",
     "dotenv": "^16.4.5",
     "express": "^4.19.2"
+  },
+  "devDependencies": {
+    "vitest": "^1.0.0",
+    "@vitest/ui": "^1.0.0",
+    "c8": "^8.0.0"
+  },
+  "vitest": {
+    "environment": "node",
+    "coverage": {
+      "provider": "c8",
+      "reporter": ["text", "html"],
+      "include": ["services/**/*.js"],
+      "exclude": ["tests/**/*", "node_modules/**/*"]
+    }
   }
 }
